@@ -12,7 +12,8 @@ const (
 	ChannelSMS   Channel = "sms"
 )
 
-func (ch Channel) valid() bool { return ch == ChannelEmail || ch == ChannelSMS }
+// Valid reports whether ch is a supported channel.
+func (ch Channel) Valid() bool { return ch == ChannelEmail || ch == ChannelSMS }
 
 // Permission records whether a customer allows marketing messages on a channel, and since
 // when.

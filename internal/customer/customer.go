@@ -57,7 +57,7 @@ func New(p Profile, createdAt time.Time) (*Customer, error) {
 		return nil, fmt.Errorf("%w email: missing", ErrInvalid)
 	case p.CityID <= 0:
 		return nil, fmt.Errorf("%w city ID %d", ErrInvalid, p.CityID)
-	case !p.Language.valid():
+	case !p.Language.Valid():
 		return nil, fmt.Errorf("%w language %q: want tr, de or en", ErrInvalid, string(p.Language))
 	case createdAt.IsZero():
 		return nil, fmt.Errorf("%w signup time: missing", ErrInvalid)
@@ -111,7 +111,7 @@ func (c *Customer) Permissions() []Permission {
 }
 
 func (c *Customer) checkPermissionChange(ch Channel, at time.Time) error {
-	if !ch.valid() {
+	if !ch.Valid() {
 		return fmt.Errorf("%w channel %q", ErrInvalid, string(ch))
 	}
 	if at.Before(c.createdAt) {

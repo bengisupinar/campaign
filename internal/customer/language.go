@@ -13,7 +13,8 @@ const (
 	LanguageEnglish Language = "en"
 )
 
-func (l Language) valid() bool {
+// Valid reports whether l is a supported language.
+func (l Language) Valid() bool {
 	switch l {
 	case LanguageTurkish, LanguageGerman, LanguageEnglish:
 		return true

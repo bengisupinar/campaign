@@ -4,10 +4,11 @@ package health
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/bengisupinar/campaign/internal/platform/httpserver"
 )
 
 const (
@@ -44,7 +45,7 @@ type response struct {
 
 // Live handles LivenessPath.
 func (p *Probes) Live(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, response{Status: statusOK})
+	httpserver.WriteJSON(w, http.StatusOK, response{Status: statusOK})
 }
 
 // Ready handles ReadinessPath. It responds 503 when any check fails. Failure details are
@@ -65,13 +66,5 @@ func (p *Probes) Ready(w http.ResponseWriter, r *http.Request) {
 		}
 		res.Checks[name] = statusOK
 	}
-	writeJSON(w, code, res)
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(code)
-	// An encoding error here means the client went away; there is nobody left to tell.
-	_ = json.NewEncoder(w).Encode(v)
+	httpserver.WriteJSON(w, code, res)
 }
