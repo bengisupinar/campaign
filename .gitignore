@@ -81,6 +81,8 @@ dist-ssr/
 .nuxt/
 .output/
 *.local
+*.timestamp-*-*.mjs
+__screenshots__/
 
 # Caches
 .cache/
@@ -89,24 +91,27 @@ dist-ssr/
 .stylelintcache
 *.tsbuildinfo
 
+# Patterns containing a "/" only match next to this file unless prefixed with **/,
+# so the ones below use **/ to also cover frontend/.
+
 # Yarn Berry (keep the files Yarn expects to be committed)
 .pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/sdks
-!.yarn/versions
+**/.yarn/*
+!**/.yarn/patches
+!**/.yarn/plugins
+!**/.yarn/releases
+!**/.yarn/sdks
+!**/.yarn/versions
 
 # Test & coverage output
 coverage/
 .nyc_output/
-cypress/videos/
-cypress/screenshots/
+**/cypress/videos/
+**/cypress/screenshots/
 test-results/
 playwright-report/
 blob-report/
-playwright/.cache/
+**/playwright/.cache/
 
 # =============================================================================
 # Logs
@@ -122,9 +127,9 @@ lerna-debug.log*
 # =============================================================================
 # IDEs & editors
 # =============================================================================
-# VS Code — keep shared extension recommendations only
-.vscode/*
-!.vscode/extensions.json
+# VS Code — keep shared extension recommendations only (at any depth)
+**/.vscode/*
+!**/.vscode/extensions.json
 .history/
 
 # JetBrains (GoLand, WebStorm, IntelliJ)
