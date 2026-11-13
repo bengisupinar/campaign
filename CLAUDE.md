@@ -36,8 +36,9 @@ to synthetic users through mock providers, with delivery status tracked in real 
 
 | Command | Purpose |
 |---|---|
-| `docker compose up --build` | Start the whole application: web on :3000, API on :8080 |
+| `docker compose up --build` | Start the whole application, seeding demo data on first start: web on :3000, API on :8080 |
 | `make db` then `make run` | PostgreSQL in Docker, API on the host (needs `cp .env.example .env`) |
+| `make seed` | Fill an empty database with the synthetic demo data; a seeded database is left alone |
 | `make web-dev` | Vite dev server on :5173, proxying `/api` and `/readyz` to :8080 |
 | `make test` · `make lint` · `make fmt` | Go tests with `-race`, golangci-lint v2, formatting |
 | `make test-integration` | Go tests plus the schema tests against PostgreSQL (needs `make db`); run it when migrations change |

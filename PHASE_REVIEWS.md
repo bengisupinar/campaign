@@ -6,6 +6,160 @@ snapshots taken when a phase is finished; later phases add entries rather than r
 ones. The reasoning behind each choice is in [DECISIONS.md](DECISIONS.md), setup and commands
 are in [README.md](README.md).
 
+## Phase 2B: Persistence and synthetic data (2026-11-14)
+
+**Scope.**
+
+- Insert-only GORM persistence for the Customer and Commerce contexts.
+- A deterministic, idempotent seeder that fills an empty database with 5,000 synthetic
+  customers in TR, DE and GB, with their permissions, baskets and orders. Compose runs it as a
+  one-shot service before the API.
+
+Not built yet:
+
+- reads and updates, which nothing calls yet;
+- basket history, now documented as a limitation;
+- Campaign, Segmentation, Delivery and AI.
+
+**Result.**
+
+- `make check` and `make test-integration` pass.
+- Starting from an empty volume, `docker compose up --build --wait` seeds the data in 1.2 s,
+  and the whole stack is healthy in about 15 s.
+- A second start leaves the data alone.
+
+### How the pieces fit
+
+```text
+postgres ──healthy──► seed ──exit 0──► api ──healthy──► web
+                       │
+                       ├─ migrate (idempotent, locked)
+                       ├─ one transaction: advisory lock → customers exist? → stop
+                       └─ generate and insert, in dependency order:
+                          countries, cities → categories, products → customers, permissions
+                          → orders, order lines → basket lines
+```
+
+### Components
+
+| Component | Location | What it does | Tests |
+|---|---|---|---|
+| Customer store | `internal/customer/store.go` | Inserts countries, cities, customers and their permissions; checks whether customers exist | 2 integration tests |
+| Commerce store | `internal/commerce/store.go` | Inserts categories, products, orders with their lines, and basket lines | 1 integration test |
+| Batch insert | `internal/platform/database` (`Insert`) | GORM `CreateInBatches` in batches of 1,000, IDs returned | Through the stores |
+| Seeder | `internal/seed` | Catalogue, people, personas, generator and `Run` | 15 cases, 88.2 % (74.0 % without a database) |
+| Seed command | `cmd/seed` | Migrates, seeds with the default options, logs the counts | End to end in Compose |
+| Test database | `internal/platform/database/databasetest` | A throwaway, migrated database per test | Used by four packages |
+| Logger | `internal/platform/config` (`NewLogger`) | Shared by both commands | 2 cases |
+| Compose and Makefile | `compose.yaml`, `Makefile` | `seed` service before `api`; `make seed` | End to end |
+
+With PostgreSQL available, coverage is 94.6 % for `customer` and 95.0 % for `commerce`.
+
+#### Persistence (`internal/customer/store.go`, `internal/commerce/store.go`)
+
+- **Insert-only operations.** Customer: `CreateCountries`, `CreateCities`, `CreateCustomers`,
+  `HasCustomers`. Commerce: `CreateCategories`, `CreateProducts`, `CreateOrders`,
+  `CreateBaskets`. Nothing reads or updates yet.
+- **Row structs.** Unexported row structs with explicit table names map the domain types.
+  GORM's automatic timestamps are off, so generated times are stored as given, and a missing
+  phone is stored as NULL.
+- **IDs.** PostgreSQL returns them, and they are written back into the aggregates or reference
+  structs. Saving a customer or order that already has an ID fails.
+- **Transactions.** Stores take a `*gorm.DB` that may be a transaction; the seeder owns the
+  transaction.
+
+#### Seeder (`internal/seed`)
+
+- **Geography and catalogue** (`catalog.go`):
+  - 3 countries and 28 cities, with population-like weights;
+  - 8 categories × 3 brands × 7 items = 168 products, priced in TRY and ending in ,90.
+- **People** (`people.go`):
+  - 20 first and 20 last names per language;
+  - emails such as `ayse.yilmaz.42@example.com` on domains reserved for examples;
+  - synthetic mobile numbers, made unique by the customer's sequence number.
+- **Personas** (`generate.go`): new 8 %, browser 17 %, occasional 30 %, regular 20 %, loyal
+  10 %, lapsed 15 %. Each has its own signup window, number and timing of orders, and chance of
+  an open basket.
+- **Determinism.**
+  - One PCG random source with seed 20261114.
+  - Times are whole seconds, relative to the seeding time.
+  - The generator never iterates over a map.
+- **`Run`.**
+  - One transaction: take the advisory lock, then skip if customers exist.
+  - `build` hands each batch to a `sink` that inserts it, so later batches get the IDs they
+    refer to.
+  - Tests use an in-memory sink that numbers the rows instead, so they exercise the same
+    generation code.
+
+#### Compose (`compose.yaml`)
+
+- `seed` runs `/app/seed` from the backend image once postgres is healthy.
+- `api` waits for `seed` to complete successfully.
+- The database URL is defined once, in `x-database-url`.
+
+### The dataset
+
+| Rows | Count |
+|---|---|
+| Customers | 5,000 (designed split: TR 60 %, DE 25 %, GB 15 %) |
+| Permission rows | 8,059 |
+| Products | 168 |
+| Orders | 18,791 (6.1 % cancelled, 3.7 % refunded) |
+| Order lines | 35,488 |
+| Basket lines | 3,560 |
+
+The tests guarantee these segments. The counts are from the default data:
+
+| Segment | Customers | Guaranteed |
+|---|---|---|
+| İstanbul, basket added in the last 30 days, no completed order since, SMS allowed | 56 | ≥ 25 |
+| Never completed an order | 1,110 | ≥ 15 % |
+| Lapsed: last completed order 180+ days ago | 1,404 | ≥ 10 % |
+| Loyal: 10+ completed orders | 376 | ≥ 5 % |
+| Signed up in the last 30 days | 398 | ≥ 5 % |
+| German customers who prefer Turkish | 321 | ≥ 15 % of DE |
+| No phone | 498 | ≥ 5 % |
+| Withdrew a permission | 504 | ≥ 2 % |
+
+Every city has customers, and every category has buyers in the last 90 days.
+
+### Verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `make check` | Pass: Go tests with `-race`; lint with 0 issues; frontend tests (6) and build |
+| 2 | `make test-integration` | Pass. The stores round-trip their rows. `Run` inserts exactly the generated dataset. The example segment as SQL matches the in-memory count (56). A second run skips, and of two concurrent runs, only one seeds |
+| 3 | Fresh stack: `docker compose down -v && docker compose up --build --wait` | Pass. The seed applied migrations 1–3, seeded in 1.233 s and exited 0. api and web became healthy. `--wait` accepts the completed one-shot service. About 15 s in total |
+| 4 | Second `docker compose up` | Pass: the seed logged "nothing to seed" and the row counts are unchanged |
+| 5 | `make seed` on the host | Pass: it applies migrations and leaves the seeded database alone |
+| 6 | EXPLAIN ANALYZE of the example segment | Pass: 56 customers in 1.5 ms. It uses `customers_city_id_idx`, the permissions primary key and `orders_customer_id_ordered_at_idx`; `basket_items` is small enough for a sequential scan |
+
+### Deviations from the plan
+
+- **Logging:** `Run` returns a `Result` and `cmd/seed` logs it; `Run` no longer takes a logger.
+- **Batch insert:** both stores use a shared `database.Insert` in the platform package instead
+  of each having its own copy.
+- **Permission rows:** there are 8,059 instead of the estimated ~6,500, because declined
+  answers are stored too, as rows with `granted = false`.
+- **Further improvements:** the README list gained "refresh aged demo data without removing
+  the volume".
+
+### Worth a closer look
+
+- **The API now depends on the seeder.** A failing seed blocks `docker compose up`. That is
+  deliberate, so the demo is never empty, but it ties API availability to demo data in
+  Compose. A production deployment wouldn't run the seed service.
+- **Data ages in a persisted volume.** Everything is relative to the seeding time, so weeks
+  later the "last 30 days" segments shrink. `docker compose down -v` refreshes the data.
+- **Reproducibility across Go versions.** The dataset is reproducible with a given Go version.
+  If a future release changes how `math/rand/v2` derives values such as `IntN` from the
+  source, the exact rows could change. The tests compare two runs with each other rather than
+  with fixed values.
+- **Realistic-looking phone numbers.** They are synthetic but sit in plausible mobile ranges,
+  so only mock providers may ever use them.
+- **No read code yet.** The segmentation phase will read these tables directly (DECISIONS.md
+  §13).
+
 ## Phase 2A: Customer and Commerce (2026-11-13)
 
 **Scope.** The Customer and Commerce bounded contexts: their schema (two migrations) and domain

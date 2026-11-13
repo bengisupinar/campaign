@@ -3,7 +3,7 @@
 Each entry records the context, the decision and its consequences. Entries are appended as
 the project evolves; a superseded decision is marked as such rather than deleted.
 Phase 1 (project foundation, entries 1–12) and Phase 2A (customer and commerce, 13–17)
-decisions were recorded on 2026-11-13.
+decisions were recorded on 2026-11-13, Phase 2B (seeding, 18) on 2026-11-14.
 
 ## 1. One repository: Go module at the root, Vue app in `frontend/`
 
@@ -123,7 +123,8 @@ must watch for shutdown explicitly when they are added.
 final system will also include the frontend, seed data and mock providers.
 
 **Decision.** `compose.yaml` runs `postgres`, `api` and `web`. Every variable has a development
-default, so no `.env` is needed. Healthchecks order startup: postgres → api (`/readyz`) → web.
+default, so no `.env` is needed. Healthchecks order startup: postgres → api (`/readyz`) → web;
+since decision 18, a one-shot `seed` service runs between postgres and api.
 The backend image builds every `./cmd/*` binary, so future one-shot or long-running services
 (seed, mock provider, worker) are new Compose services reusing the image with a different
 `command`. The runtime image is `alpine` running as uid 10001 rather than distroless: busybox
@@ -242,6 +243,38 @@ IDs before saving, at 16 bytes per key.
 domain (raw SQL, psql) can break the domain-only rules, so the seeder must go through the
 domain types.
 
+## 18. Synthetic data seeding
+
+**Context.** Segmentation and campaigns need realistic customers and shopping activity, and
+`docker compose up` must start everything, seed data included.
+
+**Decision.** A separate `cmd/seed` binary, run by a one-shot Compose service between postgres
+and api, applies migrations and fills an empty database with 5,000 customers in TR, DE and GB,
+their permissions, baskets and orders, and a 168-product catalogue.
+
+- **Idempotent:** one transaction under a PostgreSQL advisory lock that does nothing when
+  customers exist, so it runs on every start and concurrent runs seed once. Removing the volume
+  (`docker compose down -v`) reseeds.
+- **Deterministic:** one PCG random source with a fixed seed, and every timestamp relative to
+  the seeding time, so the same seed and time give the same data and "the last 30 days" always
+  has activity.
+- **Representative:** six personas (new, browser, occasional, regular, loyal, lapsed) guarantee
+  every segment worth demonstrating, and tests assert a minimum size for each. Names, cities
+  and products are hand-written lists. Emails use domains reserved for examples (RFC 2606) and
+  phone numbers are synthetic.
+- **Through the domain:** every row is built by the domain constructors, so the Phase 2A
+  invariants hold, and written by insert-only GORM stores in `customer` and `commerce`, in
+  batches of 1,000. About 70,000 rows take a second or two.
+
+Alternatives: seeding inside the API on startup (demo code in the production binary, slower
+starts); a faker library (another dependency, poor Turkish data, no guaranteed segment
+coverage); `COPY` (bypasses GORM, unnecessary at this size).
+
+**Consequences.** The API starts only after seeding succeeds, so a failed seed stops
+`docker compose up` instead of serving an empty demo. Data relative to the seeding time ages
+in a persisted volume; recreating the volume refreshes it. `basket_items` holds only open
+lines, so basket history can't be segmented (README, further improvements).
+
 ## Open questions for later phases
 
 - **LLM without an API key:** select the mock provider when `ANTHROPIC_API_KEY` is empty, so the
@@ -249,7 +282,8 @@ domain types.
 - **Segmentation rules:** validate LLM output against a whitelist schema, then compile it to
   parameterised queries.
 - **Real-time status:** SSE versus WebSockets; fan-out across instances (LISTEN/NOTIFY) if the API scales out.
-- **Seed data:** a one-shot, idempotent Compose service that runs after the API is healthy.
+- **Seed data:** answered by decision 18, a one-shot, idempotent Compose service that runs
+  before the API.
 - **Mock provider:** a separate Compose service versus an in-process adapter.
 - **What "haven't purchased" means** in a segment: never, not within the segment's window, or
   not since the basket add. The schema supports all three.

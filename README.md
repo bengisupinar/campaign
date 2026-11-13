@@ -5,11 +5,10 @@ language; an LLM proposes audience segmentation rules and SMS/email content; peo
 edit and approve it; approved campaigns are sent asynchronously to synthetic users through
 mock providers, and delivery status is tracked in real time.
 
-> **Status — Phase 2A (customer and commerce model).** On top of the Phase 1 foundation
-> (PostgreSQL, migrations, health probes, structured logs, graceful shutdown, and a web app
-> showing the API's readiness), the schema and domain model for customers, permissions,
-> products, baskets and orders are in place. Synthetic data (Phase 2B) and campaign features
-> arrive later.
+> **Status — Phase 2B (synthetic data).** On top of the Phase 1 foundation (PostgreSQL,
+> migrations, health probes, structured logs, graceful shutdown, and a web app showing the
+> API's readiness), the customer and commerce model is in place and filled with 5,000
+> synthetic customers and their shopping activity. Campaign features arrive in later phases.
 
 ## Quick start
 
@@ -29,6 +28,16 @@ No `.env` file is needed: every setting has a development default. To change por
 credentials, `cp .env.example .env` and edit it. Stop with `docker compose down`
 (add `-v` to also delete the database volume).
 
+The first start also seeds demo data in a second or two:
+
+- 5,000 synthetic customers in Türkiye, Germany and the UK;
+- their permissions, baskets and orders;
+- a 168-product catalogue.
+
+Later starts keep the data. Timestamps are relative to the seeding time, so for fresh data
+remove the volume with `docker compose down -v`. Every email address is on a domain reserved
+for examples, and every phone number is synthetic.
+
 The first build downloads the base images and takes a few minutes.
 
 ## Development
@@ -39,6 +48,7 @@ Node ≥ 24.12 (`nvm use` picks 26 from `.nvmrc`), GNU Make, Docker.
 ```sh
 cp .env.example .env     # host settings: DATABASE_URL, text logs, ...
 make db                  # PostgreSQL in Docker
+make seed                # demo data, once (applies migrations; skips a seeded database)
 make run                 # API on :8080 (applies migrations on startup)
 
 make web-install         # once
@@ -51,7 +61,8 @@ make web-dev             # Vite on http://localhost:5173, proxying /api and /rea
 |---|---|
 | `make up` / `make down` / `make logs` | Full stack in Docker, waiting until it is healthy |
 | `make test` | Go tests with the race detector |
-| `make test-integration` | Also runs the schema tests against PostgreSQL, in throwaway databases (needs `make db` and a `.env`) |
+| `make test-integration` | Also runs the database tests (schema, stores, seeding) against PostgreSQL, in throwaway databases (needs `make db` and a `.env`) |
+| `make seed` | Fill an empty database with the demo data |
 | `make lint` / `make fmt` | golangci-lint v2 (built into `./bin` on first use) / formatting |
 | `make migrate-new name=create_campaigns` | Create the next SQL migration |
 | `make migrate-status` / `migrate-up` / `migrate-down` | Inspect or move the schema version |
@@ -84,16 +95,19 @@ Docker Compose uses `/readyz` as the API healthcheck.
 
 ```
 cmd/api/                  API entry point: wiring and graceful shutdown
+cmd/seed/                 one-shot seeder: migrations, then demo data into an empty database
 internal/customer/        Customer context: customers, contact details, permissions, cities
 internal/commerce/        Commerce context: products, baskets, orders
+internal/seed/            deterministic synthetic data: catalogue, people, personas
 internal/platform/        cross-cutting technical code (no business rules)
-  config/                 environment configuration
-  database/               GORM connection pool, migrations on startup
+  config/                 environment configuration, logger
+  database/               GORM connection pool, batch inserts, migrations on startup;
+                          databasetest/ gives integration tests a throwaway database
   health/                 liveness and readiness probes
   httpserver/             router, middleware, server lifecycle
 migrations/               versioned SQL migrations (goose), embedded in the binary; schema tests
 frontend/                 Vue 3 + TypeScript + Vite app, its Dockerfile and nginx config
-compose.yaml              postgres, api, web
+compose.yaml              postgres, seed (one-shot), api, web
 ```
 
 Each business capability is a single package, `internal/<capability>`. See
@@ -110,7 +124,12 @@ Deliberately left out so far; each phase review adds what it defers.
 - [ ] **Partial refunds,** by line or by amount. Orders are refunded in full today.
 - [ ] **Consent history:** every permission change with its source (signup, unsubscribe link,
       SMS STOP), as proof of consent. Only the current state is stored today.
-- [ ] **Basket history:** add and remove events, and baskets abandoned, then recovered.
+- [ ] **Basket history.** Today `basket_items` holds only open lines: a product that was bought
+      or removed leaves no trace. So "added X, then bought it", "abandoned, then recovered" and
+      "removed from the basket" can't be segmented, and abandonment is inferred from when open
+      lines were added. Needs add and remove events.
+- [ ] **Refresh aged demo data** without removing the volume, such as a reset option for the
+      seeder. Today only `docker compose down -v` reseeds.
 - [ ] **Product price history,** for price-drop campaigns.
 - [ ] **Category hierarchy.** Categories are flat today.
 - [ ] **More customer attributes,** such as birth date or gender, if segments need them. They
