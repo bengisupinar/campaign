@@ -1,0 +1,8 @@
+# Host-installed packages contain macOS binaries; the image installs its own.
+node_modules
+dist
+coverage
+.vscode
+*.log
+Dockerfile
+.dockerignore

@@ -1,0 +1,60 @@
+# One command starts the whole application:  docker compose up --build
+#
+# Every variable has a development default, so no .env file is required. A .env file
+# (see .env.example) only overrides values. Never put real credentials in this file.
+
+name: campaign
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-campaign}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-campaign}
+      POSTGRES_DB: ${POSTGRES_DB:-campaign}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18+ images keep PGDATA under /var/lib/postgresql/<major>/docker,
+      # so the volume is mounted one level up (not at .../data as for older versions).
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+      start_interval: 1s
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-campaign}:${POSTGRES_PASSWORD:-campaign}@postgres:5432/${POSTGRES_DB:-campaign}?sslmode=disable
+      HTTP_ADDR: ":8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+      start_interval: 1s
+    # Longer than the API's 10s shutdown timeout, so in-flight requests can finish.
+    stop_grace_period: 15s
+
+  web:
+    build: ./frontend
+    ports:
+      - "${WEB_PORT:-3000}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:

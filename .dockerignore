@@ -1,0 +1,19 @@
+# Build context of the backend image (./Dockerfile): only Go sources and migrations.
+# The frontend is built from its own context (frontend/) with its own .dockerignore.
+.git
+.claude
+.vscode
+.idea
+frontend
+bin
+tmp
+coverage*
+*.md
+.env
+.env.*
+.golangci.yml
+.nvmrc
+compose.yaml
+Makefile
+Dockerfile
+.dockerignore
