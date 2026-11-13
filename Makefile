@@ -20,7 +20,7 @@ GOOSE = go run -tags='no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_ve
 	github.com/pressly/goose/v3/cmd/goose@$(shell go list -m -f '{{.Version}}' github.com/pressly/goose/v3)
 GOOSE_ENV = GOOSE_DRIVER=postgres GOOSE_DBSTRING="$(DATABASE_URL)" GOOSE_MIGRATION_DIR=migrations
 
-.PHONY: help up down logs db run test lint fmt \
+.PHONY: help up down logs db run test test-integration lint fmt \
 	migrate-up migrate-down migrate-status migrate-new \
 	web-install web-dev web-test web-lint web-build check dotenv node-check
 
@@ -49,6 +49,11 @@ run: dotenv ## Run the API on the host (needs `make db` and a .env)
 
 test: ## Run the Go tests with the race detector
 	go test -race ./...
+
+# Database tests create and drop throwaway databases on the server in .env's DATABASE_URL;
+# silenced (@) so the connection string is never echoed.
+test-integration: dotenv ## Run the Go tests including those that need PostgreSQL (needs `make db`)
+	@TEST_DATABASE_URL="$(DATABASE_URL)" go test -race -count=1 ./...
 
 lint: $(GOLANGCI_LINT) ## Lint the Go code
 	$(GOLANGCI_LINT) run
