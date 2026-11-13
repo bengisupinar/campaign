@@ -2,8 +2,12 @@
 #
 # Every variable has a development default, so no .env file is required. A .env file
 # (see .env.example) only overrides values. Never put real credentials in this file.
+#
+# Startup order: postgres → seed (one-shot) → api → web.
 
 name: campaign
+
+x-database-url: &database-url postgres://${POSTGRES_USER:-campaign}:${POSTGRES_PASSWORD:-campaign}@postgres:5432/${POSTGRES_DB:-campaign}?sslmode=disable
 
 services:
   postgres:
@@ -26,10 +30,24 @@ services:
       start_period: 10s
       start_interval: 1s
 
+  # Applies migrations, fills an empty database with synthetic demo data and exits. It leaves
+  # a database that has customers untouched, so it runs on every start; to reseed, remove the
+  # volume with `docker compose down -v`.
+  seed:
+    build: .
+    command: ["/app/seed"]
+    environment:
+      DATABASE_URL: *database-url
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build: .
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-campaign}:${POSTGRES_PASSWORD:-campaign}@postgres:5432/${POSTGRES_DB:-campaign}?sslmode=disable
+      DATABASE_URL: *database-url
       HTTP_ADDR: ":8080"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: json
@@ -38,6 +56,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      seed:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
       interval: 10s

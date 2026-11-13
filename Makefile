@@ -20,7 +20,7 @@ GOOSE = go run -tags='no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_ve
 	github.com/pressly/goose/v3/cmd/goose@$(shell go list -m -f '{{.Version}}' github.com/pressly/goose/v3)
 GOOSE_ENV = GOOSE_DRIVER=postgres GOOSE_DBSTRING="$(DATABASE_URL)" GOOSE_MIGRATION_DIR=migrations
 
-.PHONY: help up down logs db run test test-integration lint fmt \
+.PHONY: help up down logs db run seed test test-integration lint fmt \
 	migrate-up migrate-down migrate-status migrate-new \
 	web-install web-dev web-test web-lint web-build check dotenv node-check
 
@@ -44,6 +44,9 @@ db: ## Start only PostgreSQL, for running the API on the host
 
 run: dotenv ## Run the API on the host (needs `make db` and a .env)
 	go run ./cmd/api
+
+seed: dotenv ## Fill an empty database with synthetic demo data (needs `make db` and a .env)
+	go run ./cmd/seed
 
 # --- Go -----------------------------------------------------------------------------
 
