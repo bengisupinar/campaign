@@ -6,6 +6,158 @@ snapshots taken when a phase is finished; later phases add entries rather than r
 ones. The reasoning behind each choice is in [DECISIONS.md](DECISIONS.md), setup and commands
 are in [README.md](README.md).
 
+## Phase 2A: Customer and Commerce (2026-11-13)
+
+**Scope.** The Customer and Commerce bounded contexts: their schema (two migrations) and domain
+model, shaped for segmentation queries and for the seeder. Decisions taken while planning:
+
+- customers in several countries (TR, DE, GB), speaking `tr`, `de` or `en`;
+- an optional phone;
+- orders that are `completed`, `cancelled` or `refunded`, refunds always in full;
+- bigint identity keys;
+- every price in TRY.
+
+Not built yet: persistence code and synthetic data (Phase 2B), the segmentation engine,
+campaigns, AI and delivery.
+
+**Result.** `make check` and `make test-integration` pass, and the running API applied both
+migrations on startup.
+
+### How the pieces fit
+
+```text
+countries ─< cities ─< customers ─< notification_permissions
+                         │  │
+                         │  └─< orders ─< order_items ─┐
+                         │                             ├─> products ─> categories
+                         └─< basket_items ─────────────┘
+```
+
+`─<` means "has many" and `─>` means "refers to". The first row is the Customer context; the
+rest is Commerce, which refers to customers by ID. Nothing writes these tables yet:
+
+- the seeder (Phase 2B) will write them, through the domain types;
+- the segmentation engine will read them directly, in single SQL statements (DECISIONS.md §13).
+
+### Components
+
+| Component | Location | What it does | Tests |
+|---|---|---|---|
+| Customer schema | `migrations/00002_customer.sql` | Countries, cities, customers and their marketing permissions | Schema tests |
+| Commerce schema | `migrations/00003_commerce.sql` | Categories, products, basket lines, orders and order lines | Schema tests |
+| Customer domain | `internal/customer` | Customer aggregate with its permissions; Email, Phone, Language, Channel; Country, City | 42 cases, 98.6 % |
+| Commerce domain | `internal/commerce` | Product, Basket and Order; Money; Category | 34 cases, 100 % |
+| Schema tests | `migrations/migrations_test.go` | Every constraint, the delete rules and the migration round trip, against real PostgreSQL | 32 cases, via `make test-integration` |
+| Tooling and docs | `Makefile`, `DECISIONS.md`, `README.md`, `CLAUDE.md` | `make test-integration`; decisions 13–17; the further-improvements list | — |
+
+#### Schema (`migrations/00002_customer.sql`, `migrations/00003_commerce.sql`)
+
+- **Keys.** Every table has an identity key, except `countries`, which is keyed by its ISO code.
+  Composite primary keys make two rules structural: one permission per channel, and one line
+  per product in baskets and orders.
+- **CHECK constraints.** They mirror the domain's closed sets and ranges:
+  - E.164 phones;
+  - languages, channels and order statuses;
+  - positive quantities and prices;
+  - no status change before its order.
+- **Deletes.** They cascade only to what belongs to the parent: permissions, basket lines and
+  order lines. Deleting a customer with orders, or a product in use, fails.
+- **Indexes.** They serve the segment joins:
+  - `customers (city_id)`;
+  - `orders (customer_id, ordered_at)`;
+  - `basket_items (product_id)` and `order_items (product_id)`;
+  - `products (category_id)`;
+  - the unique `cities (country_code, name)`, which doubles as the country filter.
+
+#### Customer domain (`internal/customer`)
+
+- **New customers.** `New(profile, createdAt)` checks the trimmed names, the email, the city
+  and the language. A new customer has no permissions, so every channel starts as not permitted.
+- **Permissions.** `Grant`, `Revoke`, `Permitted` and `Permissions` manage marketing
+  permissions.
+  - Granting SMS to a customer without a phone fails with `ErrUnreachable`.
+  - No change can predate the signup.
+- **Contact details.**
+  - `ParseEmail` trims, lowercases and accepts only a single plain address.
+  - `ParsePhone` strips formatting and requires E.164.
+  - Their errors never repeat the input, and they log masked values (`***@example.com`,
+    `+90********67`).
+- **Closed sets and reference data.** `Language` and `Channel` match the CHECK constraints;
+  `Country` and `City` are plain reference data.
+
+#### Commerce domain (`internal/commerce`)
+
+- **Products.** `NewProduct` requires a category, a name and a price above zero. `Category` is
+  plain reference data.
+- **Baskets.** `Basket.Add` keeps one line per product: adding again raises the quantity and
+  keeps the latest add time.
+- **Orders.**
+  - `NewOrder` requires lines: one per product, each with a quantity above zero and a unit
+    price of zero or more. A new order starts `completed`.
+  - `Cancel` and `Refund` work only from `completed`, only once, and never before the order
+    time.
+  - `Total` is computed. Lines are copied in and out, so callers can't change them.
+- **Money.** An int64 amount in kuruş.
+
+#### Schema tests (`migrations/migrations_test.go`)
+
+- **Skipped by default.** They run only when `TEST_DATABASE_URL` is set, so `make test` and
+  `make check` still need no database.
+- **Throwaway databases.** Each test creates a `campaign_test_*` database, migrates it with the
+  application's own `database.Open` and `database.Migrate`, and drops it afterwards.
+- **Coverage.**
+  - 30 table-driven cases each break one constraint and assert its name.
+  - One test checks the cascading deletes.
+  - One test migrates down to version 0 and back up.
+
+### Verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `make check` | Pass: Go tests with `-race`, `make lint` with 0 issues, frontend lint, type-check, 6 tests and build |
+| 2 | `make test-integration` | Pass: all 30 constraint cases, the cascading deletes, and migrations down to 0 and back up. No test database was left behind |
+| 3 | Migrations on startup | Pass: the rebuilt API logged versions 2 and 3 as applied, `make migrate-status` lists all three, and `/readyz` answers 200 through nginx |
+| 4 | Example segment query | Pass: it runs on the real schema. On empty tables, EXPLAIN uses `customers_city_id_idx`, `basket_items_pkey`, `orders_customer_id_ordered_at_idx` and `notification_permissions_pkey` |
+| 5 | Domain invariants | Pass: every invariant and status transition has a test case. The only uncovered statement is a defensive branch for unknown channels |
+
+Not checked: query plans at realistic volumes, which need the seeder's data.
+
+### Deviations from the plan
+
+- **Additions:**
+  - a CHECK that country codes are two capital letters;
+  - the cascading-delete test;
+  - a schema test case that a customer with orders can't be deleted.
+- **Unplanned file:** `internal/commerce/commerce.go` holds the package documentation and errors.
+- **No tests for reference data:** `Country`, `City` and `Category` are plain structs with no
+  behaviour yet.
+- **Personal data:** validation errors never repeat the rejected value, because it may be
+  personal data.
+- **CLAUDE.md:** two new conventions:
+  - the no-personal-data rule now covers error messages;
+  - domain code takes the current time as a parameter.
+
+### Worth a closer look
+
+- **Domain-only rules.** The database can't enforce these:
+  - SMS permission needs a phone;
+  - an order has lines;
+  - the order status lifecycle.
+
+  A writer that bypasses the domain types, such as raw SQL or psql, can break them, so the
+  seeder must use the domain types.
+- **Segmentation reads these tables directly** (DECISIONS.md §13). Renaming a column will break
+  segment queries, so once those queries exist, their tests should run against this schema.
+- **`make test-integration` isn't part of `make check`.** CI would need a PostgreSQL service.
+  Until then, run it whenever migrations change.
+- **Everything is priced in TRY,** including for customers in Germany and the UK. Spend segments
+  are therefore only meaningful in TRY.
+- **No persistence code yet.** The GORM mapping arrives with the seeder, and IDs stay 0 until
+  then.
+
+What this phase deferred is on README.md's further-improvements list. What "haven't purchased"
+means in a segment is an open question in DECISIONS.md.
+
 ## Phase 1: Project foundation (2026-11-13)
 
 **Scope.** A runnable skeleton without business features. The Go API connects to PostgreSQL,

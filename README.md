@@ -5,9 +5,11 @@ language; an LLM proposes audience segmentation rules and SMS/email content; peo
 edit and approve it; approved campaigns are sent asynchronously to synthetic users through
 mock providers, and delivery status is tracked in real time.
 
-> **Status — Phase 1 (foundation).** The API connects to PostgreSQL, applies migrations,
-> exposes health probes, logs structured JSON and shuts down gracefully; the web app shows
-> the API's readiness. Campaign features arrive in later phases.
+> **Status — Phase 2A (customer and commerce model).** On top of the Phase 1 foundation
+> (PostgreSQL, migrations, health probes, structured logs, graceful shutdown, and a web app
+> showing the API's readiness), the schema and domain model for customers, permissions,
+> products, baskets and orders are in place. Synthetic data (Phase 2B) and campaign features
+> arrive later.
 
 ## Quick start
 
@@ -49,11 +51,12 @@ make web-dev             # Vite on http://localhost:5173, proxying /api and /rea
 |---|---|
 | `make up` / `make down` / `make logs` | Full stack in Docker, waiting until it is healthy |
 | `make test` | Go tests with the race detector |
+| `make test-integration` | Also runs the schema tests against PostgreSQL, in throwaway databases (needs `make db` and a `.env`) |
 | `make lint` / `make fmt` | golangci-lint v2 (built into `./bin` on first use) / formatting |
 | `make migrate-new name=create_campaigns` | Create the next SQL migration |
 | `make migrate-status` / `migrate-up` / `migrate-down` | Inspect or move the schema version |
 | `make web-test` / `web-lint` / `web-build` | Frontend unit tests, lint + type-check, production build |
-| `make check` | Everything above that CI would run |
+| `make check` | Every Go and frontend check that needs no database |
 
 ## Configuration
 
@@ -81,17 +84,37 @@ Docker Compose uses `/readyz` as the API healthcheck.
 
 ```
 cmd/api/                  API entry point: wiring and graceful shutdown
+internal/customer/        Customer context: customers, contact details, permissions, cities
+internal/commerce/        Commerce context: products, baskets, orders
 internal/platform/        cross-cutting technical code (no business rules)
   config/                 environment configuration
   database/               GORM connection pool, migrations on startup
   health/                 liveness and readiness probes
   httpserver/             router, middleware, server lifecycle
-migrations/               versioned SQL migrations (goose), embedded in the binary
+migrations/               versioned SQL migrations (goose), embedded in the binary; schema tests
 frontend/                 Vue 3 + TypeScript + Vite app, its Dockerfile and nginx config
 compose.yaml              postgres, api, web
 ```
 
-Business capabilities will live in `internal/<capability>` (e.g. `internal/campaign`), each
-in a single package. See [DECISIONS.md](DECISIONS.md) for the reasoning behind the stack and
-structure, [PHASE_REVIEWS.md](PHASE_REVIEWS.md) for what each phase built and how it was
-verified, and [CLAUDE.md](CLAUDE.md) for the engineering principles and workflow.
+Each business capability is a single package, `internal/<capability>`. See
+[DECISIONS.md](DECISIONS.md) for the reasoning behind the stack and structure,
+[PHASE_REVIEWS.md](PHASE_REVIEWS.md) for what each phase built and how it was verified, and
+[CLAUDE.md](CLAUDE.md) for the engineering principles and workflow.
+
+## Further improvements
+
+Deliberately left out so far; each phase review adds what it defers.
+
+- [ ] **Multi-currency:** a currency per country, per-currency prices, orders in the currency
+      paid, and spend segments per currency or via exchange rates. Every amount is in TRY today.
+- [ ] **Partial refunds,** by line or by amount. Orders are refunded in full today.
+- [ ] **Consent history:** every permission change with its source (signup, unsubscribe link,
+      SMS STOP), as proof of consent. Only the current state is stored today.
+- [ ] **Basket history:** add and remove events, and baskets abandoned, then recovered.
+- [ ] **Product price history,** for price-drop campaigns.
+- [ ] **Category hierarchy.** Categories are flat today.
+- [ ] **More customer attributes,** such as birth date or gender, if segments need them. They
+      are more personal data to protect.
+- [ ] **A precomputed segmentation profile** (materialized view), if segment queries become slow.
+- [ ] **A separate migration job in production,** with a DDL role, so the API can run with a
+      DML-only role ([DECISIONS.md](DECISIONS.md) §6).

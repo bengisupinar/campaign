@@ -2,7 +2,8 @@
 
 Each entry records the context, the decision and its consequences. Entries are appended as
 the project evolves; a superseded decision is marked as such rather than deleted.
-Phase 1 (project foundation) decisions were recorded on 2026-11-13.
+Phase 1 (project foundation, entries 1–12) and Phase 2A (customer and commerce, 13–17)
+decisions were recorded on 2026-11-13.
 
 ## 1. One repository: Go module at the root, Vue app in `frontend/`
 
@@ -173,6 +174,74 @@ installs stay untouched — golangci-lint must be built with a Go at least as ne
 lints). The goose CLI runs through `go run` at the library version in `go.mod`. `make web-lint`
 checks without auto-fixing, unlike the scaffold's `npm run lint`.
 
+## 13. Customer and Commerce are read models for segmentation
+
+**Context.** Nothing in this system edits customers or places orders. The seeder writes the
+data, and opt-outs from the delivery phase will be the only later writes. Segments read both
+contexts at once.
+
+**Decision.** `internal/customer` and `internal/commerce` own every write, through thin domain
+types: value objects and three aggregates (Customer, Basket, Order) whose constructors and
+methods guard the invariants. They carry no GORM tags, take the current time as a parameter
+and get persistence code with their first caller, the seeder. The segmentation phase will read
+both contexts' tables directly in single SQL statements: a deliberate, read-only coupling that
+keeps a segment to one query instead of joins in memory.
+
+**Consequences.** Schema changes in these contexts must be checked against segmentation
+queries. Commerce refers to customers by ID only, while foreign keys cross the two contexts
+because they share one database.
+
+## 14. One open basket per customer; orders keep the price paid
+
+**Decision.** A basket has no table of its own: its lines are `basket_items` rows keyed by
+(customer, product), and "abandoned" is derived from `added_at` and later orders. Orders and
+their lines are separate tables but one aggregate. Lines never change and record the unit price
+paid, so products need no price history. A new order is `completed`; it can be cancelled or
+refunded in full, and both are final. Only completed orders count as purchases or spend.
+Totals are computed, never stored.
+
+**Consequences.** No basket history (abandoned, then recovered), partial refunds or price-drop
+campaigns; all three are on the README's further-improvements list.
+
+## 15. Marketing permissions belong to the Customer aggregate
+
+**Decision.** `notification_permissions` holds one row per customer and channel (`sms`,
+`email`): granted or not, and since when. A missing row means "not permitted", because
+commercial messages need prior opt-in (Turkish e-commerce law and İYS, GDPR). Permissions are
+part of the Customer aggregate because one rule spans them and the contact points: SMS can only
+be granted to a customer with a phone. A table rather than a column per channel keeps the
+channel a bind parameter.
+
+**Consequences.** Only the current state is kept, not a consent history. A segment is
+evaluated at one moment, so delivery must re-check the permission just before sending.
+
+## 16. Countries, languages and money
+
+**Decision.** Countries are keyed by their ISO 3166-1 alpha-2 code (`TR`, `DE`, `GB`); each
+city belongs to one country, and its name is unique there. A customer has one preferred
+language, `tr`, `de` or `en`, checked by a Go type and a CHECK constraint rather than a lookup
+table, because supporting another language needs content generation anyway. Money is an int64
+amount in kuruş, and every price is in TRY.
+
+**Consequences.** Customers in Germany and the UK pay in TRY, a simplification; multi-currency
+is on the further-improvements list.
+
+## 17. Identity keys, and where business rules live
+
+**Decision.** Primary keys are `bigint GENERATED ALWAYS AS IDENTITY`. The database enforces
+what it can state declaratively and every writer must respect: uniqueness, foreign keys,
+closed sets and ranges. The domain enforces rules that need context or span rows: a
+permission needs a reachable channel, an order needs lines and allowed status changes. Small
+closed sets are checked in both. `make test-integration` checks every constraint against a real
+PostgreSQL, in throwaway databases.
+
+Alternative: UUIDv7 keys (`uuidv7()` is built into PostgreSQL 18) would let the domain create
+IDs before saving, at 16 bytes per key.
+
+**Consequences.** New aggregates have ID 0 until they are saved. A writer that bypasses the
+domain (raw SQL, psql) can break the domain-only rules, so the seeder must go through the
+domain types.
+
 ## Open questions for later phases
 
 - **LLM without an API key:** select the mock provider when `ANTHROPIC_API_KEY` is empty, so the
@@ -182,3 +251,5 @@ checks without auto-fixing, unlike the scaffold's `npm run lint`.
 - **Real-time status:** SSE versus WebSockets; fan-out across instances (LISTEN/NOTIFY) if the API scales out.
 - **Seed data:** a one-shot, idempotent Compose service that runs after the API is healthy.
 - **Mock provider:** a separate Compose service versus an in-process adapter.
+- **What "haven't purchased" means** in a segment: never, not within the segment's window, or
+  not since the basket add. The schema supports all three.
