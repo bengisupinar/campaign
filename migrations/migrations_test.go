@@ -1,24 +1,17 @@
 package migrations_test
 
-// These tests need PostgreSQL: run `make db`, then `make test-integration`. Each test works in
-// a throwaway database, so the development data is never touched. Without TEST_DATABASE_URL
-// they are skipped, which keeps `make test` free of external dependencies.
+// These tests need PostgreSQL and are skipped without it: run `make db`, then
+// `make test-integration`. Each test works in a throwaway database.
 
 import (
-	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"log/slog"
-	"net/url"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pressly/goose/v3"
 
-	"github.com/bengisupinar/campaign/internal/platform/database"
+	"github.com/bengisupinar/campaign/internal/platform/database/databasetest"
 	"github.com/bengisupinar/campaign/migrations"
 )
 
@@ -171,55 +164,13 @@ func insertValidRows(t *testing.T, db *sql.DB) {
 	}
 }
 
-// newTestDatabase creates a database with every migration applied and drops it when the test
-// ends. It skips the test unless TEST_DATABASE_URL points at a PostgreSQL server whose user
-// may create databases.
+// newTestDatabase returns a throwaway database with every migration applied.
 func newTestDatabase(t *testing.T) *sql.DB {
 	t.Helper()
-	serverURL := os.Getenv("TEST_DATABASE_URL")
-	if serverURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set; run `make db`, then `make test-integration`")
-	}
-	ctx := t.Context()
-	logger := slog.New(slog.DiscardHandler)
-
-	server := open(t, serverURL, logger)
-	name := fmt.Sprintf("campaign_test_%d", time.Now().UnixNano())
-	if _, err := server.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatalf("create database %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		// t.Context() is already cancelled when cleanups run.
-		if _, err := server.ExecContext(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
-			t.Errorf("drop database %s: %v", name, err)
-		}
-	})
-
-	u, err := url.Parse(serverURL)
+	db, err := databasetest.New(t).DB()
 	if err != nil {
-		t.Fatal("TEST_DATABASE_URL is not a valid URL") // the error would repeat the password
+		t.Fatalf("database handle: %v", err)
 	}
-	u.Path = "/" + name
-	db := open(t, u.String(), logger)
-	if err := database.Migrate(ctx, db, migrations.FS, logger); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return db
-}
-
-// open connects through the application's own database.Open and closes the pool when the
-// test ends.
-func open(t *testing.T, dsn string, logger *slog.Logger) *sql.DB {
-	t.Helper()
-	gdb, err := database.Open(t.Context(), dsn, logger)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	db, err := gdb.DB()
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 

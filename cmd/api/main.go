@@ -34,7 +34,7 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	if err != nil {
 		return err
 	}
-	logger := newLogger(logOutput, cfg)
+	logger := cfg.NewLogger(logOutput)
 	logger.Info("starting api", slog.Any("config", cfg))
 
 	db, err := database.Open(ctx, cfg.DatabaseURL, logger)
@@ -68,12 +68,4 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	logger.Info("http server listening", slog.String("addr", ln.Addr().String()))
 
 	return httpserver.Serve(ctx, logger, ln, router)
-}
-
-func newLogger(w io.Writer, cfg config.Config) *slog.Logger {
-	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
-	if cfg.LogFormat == config.LogFormatText {
-		return slog.New(slog.NewTextHandler(w, opts))
-	}
-	return slog.New(slog.NewJSONHandler(w, opts))
 }

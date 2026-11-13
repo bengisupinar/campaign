@@ -103,6 +103,33 @@ func TestLoadIgnoresProcessEnvironment(t *testing.T) {
 	}
 }
 
+func TestNewLogger(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want string // how the info line must appear
+	}{
+		{name: "json", cfg: config.Config{LogLevel: slog.LevelInfo, LogFormat: config.LogFormatJSON}, want: `"msg":"shown"`},
+		{name: "text", cfg: config.Config{LogLevel: slog.LevelInfo, LogFormat: config.LogFormatText}, want: "msg=shown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := tt.cfg.NewLogger(&buf)
+			logger.Debug("hidden")
+			logger.Info("shown")
+
+			out := buf.String()
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output %q does not contain %q", out, tt.want)
+			}
+			if strings.Contains(out, "hidden") {
+				t.Errorf("output %q contains a debug line below the configured level", out)
+			}
+		})
+	}
+}
+
 func TestConfigLogValueRedactsDatabaseURL(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))

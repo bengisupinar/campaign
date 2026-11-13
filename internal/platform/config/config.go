@@ -1,20 +1,22 @@
-// Package config loads the API configuration from environment variables.
+// Package config loads the configuration of the api and seed commands from environment
+// variables.
 //
-// The process environment is the only source: the binary never reads .env files.
+// The process environment is the only source: the binaries never read .env files.
 // Loading fails fast and reports every missing or invalid variable at once.
 package config
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 
 	"github.com/caarlos0/env/v11"
 )
 
-// Config is the API's runtime configuration.
+// Config is the runtime configuration shared by the api and seed commands.
 type Config struct {
-	// HTTPAddr is the address the HTTP server listens on.
+	// HTTPAddr is the address the API's HTTP server listens on.
 	HTTPAddr string `env:"HTTP_ADDR" envDefault:":8080"`
 	// DatabaseURL is the PostgreSQL connection string. It holds credentials and is never logged.
 	DatabaseURL string `env:"DATABASE_URL,required,notEmpty"`
@@ -52,6 +54,16 @@ func Load(environ []string) (Config, error) {
 		return Config{}, fmt.Errorf("load config: %w", err)
 	}
 	return cfg, nil
+}
+
+// NewLogger returns a logger that writes to w in the configured format, from the configured
+// level up.
+func (c Config) NewLogger(w io.Writer) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: c.LogLevel}
+	if c.LogFormat == LogFormatText {
+		return slog.New(slog.NewTextHandler(w, opts))
+	}
+	return slog.New(slog.NewJSONHandler(w, opts))
 }
 
 // LogValue implements slog.LogValuer, so the configuration can be logged without leaking
