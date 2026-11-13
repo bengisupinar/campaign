@@ -27,7 +27,20 @@ const (
 
 	pingTimeout        = 5 * time.Second
 	slowQueryThreshold = 200 * time.Millisecond
+
+	// insertBatchSize bounds the rows per INSERT statement, keeping each well below
+	// PostgreSQL's limit of 65,535 bind parameters.
+	insertBatchSize = 1000
 )
+
+// Insert writes rows in batches of up to 1,000 and fills in the IDs the database generates.
+// An empty slice is a no-op.
+func Insert[T any](ctx context.Context, db *gorm.DB, rows []T) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return db.WithContext(ctx).CreateInBatches(rows, insertBatchSize).Error
+}
 
 // Open connects to the database at dsn and verifies the connection within pingTimeout.
 // The caller owns the pool and closes it through db.DB().
