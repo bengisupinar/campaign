@@ -82,6 +82,23 @@ func TestSchemaConstraints(t *testing.T) {
 			VALUES (999, 2, 1, 89900)`, "order_items_order_id_fkey"},
 		{"order lines hold a known product", `INSERT INTO order_items (order_id, product_id, quantity, unit_price_minor)
 			VALUES (1, 999, 1, 89900)`, "order_items_product_id_fkey"},
+
+		{"campaign names are 1 to 100 characters", insertCampaign +
+			`('', 'draft', '{}', 'Hi', NULL, NULL, now(), now())`, "campaigns_name_check"},
+		{"campaign statuses are known", insertCampaign +
+			`('Sale', 'sent', '{}', 'Hi', NULL, NULL, now(), now())`, "campaigns_status_check"},
+		{"segments are JSON objects", insertCampaign +
+			`('Sale', 'draft', '[]', 'Hi', NULL, NULL, now(), now())`, "campaigns_segment_check"},
+		{"campaigns use a channel", insertCampaign +
+			`('Sale', 'draft', '{}', NULL, NULL, NULL, now(), now())`, "campaigns_channel_check"},
+		{"SMS bodies fit in 160 characters", insertCampaign +
+			`('Sale', 'draft', '{}', repeat('ş', 161), NULL, NULL, now(), now())`, "campaigns_sms_body_check"},
+		{"email subjects fit in 80 characters", insertCampaign +
+			`('Sale', 'draft', '{}', NULL, repeat('ı', 81), 'Hello', now(), now())`, "campaigns_email_subject_check"},
+		{"emails have a subject and a body", insertCampaign +
+			`('Sale', 'draft', '{}', NULL, 'Hi', NULL, now(), now())`, "campaigns_email_check"},
+		{"updates never predate creation", insertCampaign +
+			`('Sale', 'draft', '{}', 'Hi', NULL, NULL, now(), now() - interval '1 day')`, "campaigns_updated_at_check"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -144,6 +161,10 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	}
 }
 
+// insertCampaign starts an INSERT into campaigns; the cases add the values.
+const insertCampaign = `INSERT INTO campaigns
+	(name, status, segment, sms_body, email_subject, email_body, created_at, updated_at) VALUES `
+
 // insertValidRows inserts one valid row per table (two products), all with ID 1 (products 1
 // and 2) in a fresh database.
 func insertValidRows(t *testing.T, db *sql.DB) {
@@ -157,6 +178,8 @@ func insertValidRows(t *testing.T, db *sql.DB) {
 		`INSERT INTO categories (name) VALUES ('Electronics')`,
 		`INSERT INTO products (category_id, name, price_minor) VALUES (1, 'Headphones', 149900), (1, 'Keyboard', 89900)`,
 		`INSERT INTO basket_items (customer_id, product_id, quantity, added_at) VALUES (1, 1, 1, now())`,
+		insertCampaign + `('Spring sale', 'draft', '{"version": 1, "match": "all", "conditions": []}',
+			'Hi {{first_name}}', NULL, NULL, now(), now())`,
 		`INSERT INTO orders (customer_id, status, ordered_at, status_changed_at) VALUES (1, 'completed', now(), now())`,
 		`INSERT INTO order_items (order_id, product_id, quantity, unit_price_minor) VALUES (1, 1, 1, 149900)`,
 	} {
