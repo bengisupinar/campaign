@@ -6,6 +6,132 @@ snapshots taken when a phase is finished; later phases add entries rather than r
 ones. The reasoning behind each choice is in [DECISIONS.md](DECISIONS.md), setup and commands
 are in [README.md](README.md).
 
+## Phase 3: Campaign management (2026-11-14)
+
+**Scope.**
+
+- **Domain.** A draft has a name, a segment in DSL version 1, and content per channel. The
+  lifecycle is minimal (draft, scheduled, sending), with its transitions defined; only drafts
+  change.
+- **Persistence.** The `campaigns` table (migration 4) and a GORM store whose writes only
+  touch drafts.
+- **REST API** under `/api/campaigns`: create, list, get, replace and delete drafts.
+
+Decisions taken while planning:
+
+- every save must be complete and valid;
+- SMS length counts the template as written;
+- placeholders are `first_name`, `last_name` and `city`;
+- city and category names are checked against reference data in the segmentation phase;
+- the lifecycle stays minimal.
+
+Not built yet: sending, scheduling, queues, segment queries, AI, the frontend and the shared
+error framework.
+
+**Result.**
+
+- `make check` and `make test-integration` pass.
+- The API works end to end through nginx.
+- The seeded data is untouched.
+
+### How the pieces fit
+
+```text
+POST/PUT /api/campaigns ─► handler: decode JSON (strict, 64 KB), map errors to statuses
+                              │
+                              ▼
+                           Service ─► Campaign: New / Update validate the Draft and guard the lifecycle
+                              │                 (later, AI proposals build the same Draft)
+                              ▼
+                           Store (GORM) ─► campaigns: segment as jsonb, one nullable column per content field
+```
+
+### Components
+
+| Component | Location | What it does | Tests |
+|---|---|---|---|
+| Domain | `internal/campaign` (`campaign.go`, `content.go`, `segment.go`, `problems.go`) | Draft, Campaign, lifecycle, content and segment validation | 64 cases |
+| Service | `internal/campaign/service.go` | Create, Update, Get, List, Delete over a repository interface | Through the API tests |
+| API | `internal/campaign/http.go` | REST handlers; JSON errors, including for unknown routes | 18 cases |
+| Store | `internal/campaign/store.go` | jsonb segment, nullable content, writes that only touch drafts | 6 integration cases |
+| Schema | `migrations/00004_campaigns.sql` | The `campaigns` table and its CHECK constraints | 8 constraint cases |
+| JSON helpers | `internal/platform/httpserver/json.go` | `DecodeJSON` (strict, 64 KB) and `WriteJSON`, now also used by health | 10 cases |
+| Reused checks | `internal/customer` | `Channel.Valid()` and `Language.Valid()` exported | Existing tests |
+
+Coverage of `internal/campaign` is 77.3 % without a database and 92.2 % with PostgreSQL.
+
+#### Domain (`internal/campaign`)
+
+- **Lifecycle.**
+  - `Status.CanBecome` defines four moves: draft → scheduled or sending, and scheduled →
+    draft or sending.
+  - `Update` and the service's `Delete` refuse anything but a draft.
+- **`New` and `Update`.**
+  - They trim the name and validate the whole draft, reporting every problem at once as a
+    `*ValidationError`. Each problem has a field path and a stable code.
+  - They copy the draft in and out, so callers can't change a campaign behind its back.
+- **Content.**
+  - An optional SMS or email block; the channels follow from the blocks.
+  - Limits count Unicode characters: name 100, SMS 160, subject 80.
+  - Placeholders are parsed strictly: unknown names, `{{` without `}}`, `}}` on its own, and
+    `{{}}` are all rejected.
+- **Segment DSL version 1.**
+  - 8 condition types plus `group`; any condition can be negated.
+  - Strict parameters per type.
+  - Limits: depth 3, 20 conditions, 50 values per list, windows of 1–3,650 days.
+  - An empty root targets every customer.
+
+#### Service, store and API
+
+- **Service.** `Service` is the single entry point that manual edits use now and AI proposals
+  will use later. It sets times in UTC at PostgreSQL's microsecond precision.
+- **Conditional writes.** `Store.Update` and `Store.Delete` add `AND status = 'draft'`. When no
+  row matches, they look the campaign up to answer `ErrNotFound` or `ErrNotDraft`.
+- **Errors.** Handlers map errors to responses: 422 `invalid_campaign` with the problems, 404
+  `not_found`, 409 `not_draft`, 400 `malformed_json`, 413 `body_too_large`, 405
+  `method_not_allowed`, and 500 `internal` (logged with the request ID).
+- **Requests.** Unknown fields, such as a client trying to set `status`, are rejected.
+
+### Verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `make check` | Pass: Go tests with `-race`, lint with 0 issues, frontend tests (6) and build |
+| 2 | `make test-integration` | Pass. jsonb round trip, including nested groups and pointer parameters. Writes that only touch drafts, even from a stale copy. Newest-first listing. 8 new constraint cases. The migration round trip now includes version 4 |
+| 3 | Running stack, through nginx | Pass. Create 201, get 200, replace 200 (both channels), invalid 422 with all four problems, `/send` 404 in JSON, `PATCH` 405 in JSON, 409 on a campaign scheduled in psql, delete 204, then 404. Customers still number 5,000 |
+
+### Deviations from the plan
+
+- **JSON for unknown routes.** The campaign API answers unknown routes and methods with JSON
+  404 and 405. Testing with curl showed chi's plain-text defaults.
+- **One validation error type.** Validation returns a `*ValidationError` holding a list of
+  problems rather than an `errors.Join` of field errors, because a list is simpler for the
+  handlers and the AI repair loop.
+- **No request DTOs.** `Draft`, `Segment`, `Content` and `Problem` carry JSON tags and
+  double as the API's request shapes.
+- **Tests use `new(30)`,** which Go 1.26 allows for pointers to values.
+- **Review fix: complete problem lists.** Three checks used to stop at their first problem:
+  - range bounds;
+  - lists with more than 50 values;
+  - placeholder scanning after a stray `}}` or an empty `{{ }}`.
+
+  They now report every problem, with malformed braces reported once per field.
+- **Review fix: names.** `validName` now rejects whitespace-only names explicitly; it already
+  did so implicitly. Tests cover spaces, tabs and non-breaking spaces.
+
+### Worth a closer look
+
+- **JSON tags on domain types.** `Draft` and `Segment` are the wire format for the API and,
+  later, for AI. Changing a JSON tag is an API change, and so is a new DSL version.
+- **Last write wins** when two people edit the same draft.
+- **SMS length.** 160 characters is the GSM-7 limit; Turkish letters make real messages UCS-2,
+  where each message holds 70 characters.
+- **Unchecked names.** A draft can reference an unknown city or category, e.g. "Istanbul"
+  without the dotted İ, until the segmentation phase checks names against reference data.
+- **Local error bodies.** They are defined in the campaign handlers until the shared error
+  framework moves them to the API boundary.
+- **Content storage.** The content columns will be restructured for multilingual campaigns.
+
 ## Phase 2B: Persistence and synthetic data (2026-11-14)
 
 **Scope.**

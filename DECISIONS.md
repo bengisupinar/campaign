@@ -3,7 +3,8 @@
 Each entry records the context, the decision and its consequences. Entries are appended as
 the project evolves; a superseded decision is marked as such rather than deleted.
 Phase 1 (project foundation, entries 1–12) and Phase 2A (customer and commerce, 13–17)
-decisions were recorded on 2026-11-13, Phase 2B (seeding, 18) on 2026-11-14.
+decisions were recorded on 2026-11-13; Phase 2B (seeding, 18) and Phase 3 (campaigns, 19–21) on
+2026-11-14.
 
 ## 1. One repository: Go module at the root, Vue app in `frontend/`
 
@@ -275,15 +276,99 @@ coverage); `COPY` (bypasses GORM, unnecessary at this size).
 in a persisted volume; recreating the volume refreshes it. `basket_items` holds only open
 lines, so basket history can't be segmented (README, further improvements).
 
+## 19. Campaigns: a minimal lifecycle and a draft-only API
+
+**Context.** Marketers write campaigns by hand now and with AI later. Nothing can schedule or
+send a campaign yet.
+
+**Decision.**
+
+- **Lifecycle.** A campaign is `draft`, `scheduled` or `sending`. The allowed moves are:
+  - draft → scheduled (approved with a send time);
+  - draft → sending (approved to send now);
+  - scheduled → draft (unscheduled, to edit again);
+  - scheduled → sending (its time arrived).
+
+  How a campaign finishes is decided with delivery, which will extend the transitions and the
+  CHECK constraint.
+- **Only drafts change.** Only a draft can be updated or deleted, and deletes are hard deletes.
+  Writes are conditional (`WHERE status = 'draft'`), so they can't race a later status change.
+- **One `Service`.** It holds the use cases; HTTP handlers are thin adapters around it, and AI
+  proposals will build the same `Draft`. The service depends on a small repository interface,
+  which the GORM store implements and the API tests fake.
+- **The REST API under `/api/campaigns`** creates, lists, gets, replaces (`PUT`) and deletes
+  drafts. No endpoint schedules or sends until those capabilities exist.
+- **Every save must be complete and valid.**
+- **Errors.** Error bodies carry stable codes and live in the campaign handlers; the shared
+  error framework is deferred.
+
+**Consequences.** Concurrent edits of a draft are last-write-wins; optimistic locking arrives
+with approval. Lists aren't paginated yet.
+
+## 20. Segment rules: a typed JSON DSL, version 1
+
+**Context.** Segments come from marketers and, later, from an LLM. They are untrusted input
+that the segmentation engine must turn into safe SQL.
+
+**Decision.** A segment is `{"version": 1, "match": "all"|"any", "conditions": [...]}`.
+
+- **Typed conditions.** Each condition has a `type` from a closed set: `country`, `city`,
+  `language`, `signed_up`, `basket`, `purchased`, `order_count`, `total_spent` and `group`.
+  Each type takes its own parameters (`in`, `within_days`, `categories`, `min`/`max`,
+  `min_try`/`max_try`, `match`/`conditions`), and every condition accepts `negate`.
+- **Strict validation.** Unknown types and parameters are rejected.
+- **Limits.** Depth 3, 20 conditions, 50 values per list, windows of 1–3,650 days.
+- **One SQL pattern per condition.** Each condition maps to one parameterised SQL fragment from
+  the Phase 2A query patterns.
+- **Consent is implicit:** the engine always requires permission for the campaign's channels.
+- **Names, not IDs.** Cities and categories are referenced by name, which is readable and
+  stable across reseeds. Phase 3 checks their format; the segmentation phase checks that they
+  exist.
+- **Storage.** Segments are stored as jsonb.
+
+Alternatives:
+
+- generic field/operator/value triples, which need a compatibility table of fields and
+  operators and still need parameters for time windows;
+- SQL fragments, never, because LLM output is untrusted.
+
+**Consequences.** "Haven't purchased" is `purchased` (with or without a window) negated. "Not
+since the basket add" can't be expressed in version 1.
+
+## 21. Campaign content and its validation
+
+**Decision.**
+
+- **Content blocks.** Content has an optional block per channel: `sms` (body) and `email`
+  (subject, body). The campaign's channels follow from the blocks. They are stored in nullable
+  columns with CHECK constraints.
+- **Every problem at once.** Validation reports every problem together, each with a field path
+  and a stable code (`required`, `too_long`, `unknown_placeholder`…). Forms can show every
+  error, and the AI phase can feed the list back to the model.
+- **Length limits.** They count Unicode characters of the text as written:
+  - name, at most 100;
+  - SMS, at most 160;
+  - email subject, at most 80.
+- **Placeholders.** Only `{{first_name}}`, `{{last_name}}` and `{{city}}` are allowed. Anything
+  else, or unbalanced braces, is rejected.
+
+**Consequences.**
+
+- **Segmentation of long texts.** 160 characters is the GSM-7 single-message limit. Turkish
+  letters force UCS-2, with 70 characters per message, so real messages may be split.
+  Segment-aware limits are on the further-improvements list.
+- **Rendered length.** It depends on the customer, so delivery checks it.
+- **Multilingual campaigns** will move content into a table keyed by channel and language.
+
 ## Open questions for later phases
 
 - **LLM without an API key:** select the mock provider when `ANTHROPIC_API_KEY` is empty, so the
   single command keeps working.
-- **Segmentation rules:** validate LLM output against a whitelist schema, then compile it to
-  parameterised queries.
+- **Segmentation rules:** partly answered by decision 20, a whitelisted DSL validated on save.
+  Compiling it to parameterised queries is the segmentation phase.
 - **Real-time status:** SSE versus WebSockets; fan-out across instances (LISTEN/NOTIFY) if the API scales out.
 - **Seed data:** answered by decision 18, a one-shot, idempotent Compose service that runs
   before the API.
 - **Mock provider:** a separate Compose service versus an in-process adapter.
-- **What "haven't purchased" means** in a segment: never, not within the segment's window, or
-  not since the basket add. The schema supports all three.
+- **What "haven't purchased" means** in a segment: answered by decision 20. It means "never" or
+  "not within N days", while "not since the basket add" isn't expressible in DSL version 1.

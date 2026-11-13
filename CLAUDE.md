@@ -15,6 +15,7 @@ to synthetic users through mock providers, with delivery status tracked in real 
 - Choose the simplest reliable solution. No speculative abstractions, no empty or placeholder packages.
 - Package by business capability: `internal/<capability>` (e.g. `campaign`, `audience`, `delivery`), one package holding its handlers, logic and persistence. Cross-cutting technical code lives in `internal/platform/`. Never add `handlers/`, `services/`, `repositories/` or `models/` packages, nor per-layer sub-packages.
 - Apply DDD where invariants exist (e.g. the campaign lifecycle); keep those rules in domain types and methods. Plain CRUD stays plain.
+- HTTP handlers stay thin: decode with `httpserver.DecodeJSON`, call the capability's `Service`, answer with `httpserver.WriteJSON`. Rules live in the domain, so other callers (e.g. AI proposals) share them.
 - Interfaces are small, declared by their consumer, and added only for a second implementation or a test seam.
 - Idiomatic Go: wrap errors with `%w` and context; `ctx` is the first parameter; no package-level mutable state; dependencies are wired explicitly in `cmd/`. Domain code takes the current time as a parameter instead of calling `time.Now()`.
 - Persistence: GORM only inside a capability's persistence code. The schema changes only through goose SQL migrations in `migrations/`, never `AutoMigrate`. Don't embed `gorm.Model`; do partial updates with `Select` or maps (struct `Updates` skips zero values).

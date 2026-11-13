@@ -5,10 +5,11 @@ language; an LLM proposes audience segmentation rules and SMS/email content; peo
 edit and approve it; approved campaigns are sent asynchronously to synthetic users through
 mock providers, and delivery status is tracked in real time.
 
-> **Status — Phase 2B (synthetic data).** On top of the Phase 1 foundation (PostgreSQL,
+> **Status — Phase 3 (campaign drafts).** On top of the Phase 1 foundation (PostgreSQL,
 > migrations, health probes, structured logs, graceful shutdown, and a web app showing the
-> API's readiness), the customer and commerce model is in place and filled with 5,000
-> synthetic customers and their shopping activity. Campaign features arrive in later phases.
+> API's readiness), the customer and commerce model holds 5,000 synthetic customers and their
+> shopping activity. Marketers can manage campaign drafts through the REST API. Segmentation,
+> AI, sending and scheduling arrive in later phases.
 
 ## Quick start
 
@@ -91,11 +92,48 @@ The API reads only environment variables and refuses to start if one is missing 
 
 Docker Compose uses `/readyz` as the API healthcheck.
 
+## Campaign API
+
+Campaign drafts live under `/api/campaigns`: through nginx at http://localhost:3000, or
+directly on :8080.
+
+| Request | Result |
+|---|---|
+| `POST /api/campaigns` | 201 and the new draft, with a `Location` header |
+| `GET /api/campaigns` | 200 and every campaign, newest first |
+| `GET /api/campaigns/{id}` | 200, or 404 |
+| `PUT /api/campaigns/{id}` | 200 after replacing the name, segment and content; 409 unless it is a draft |
+| `DELETE /api/campaigns/{id}` | 204; 409 unless it is a draft |
+
+```sh
+curl -X POST localhost:3000/api/campaigns -d '{
+  "name": "Abandoned baskets in İstanbul",
+  "segment": {"version": 1, "match": "all", "conditions": [
+    {"type": "city", "in": ["İstanbul"]},
+    {"type": "basket", "within_days": 30},
+    {"type": "purchased", "within_days": 30, "negate": true}
+  ]},
+  "content": {"sms": {"body": "Merhaba {{first_name}}, sepetin seni bekliyor!"}}
+}'
+```
+
+- **Channels.** A campaign uses SMS, email (`"email": {"subject": …, "body": …}`) or both.
+- **Limits.** An SMS holds at most 160 characters and an email subject at most 80.
+- **Placeholders.** Text may contain `{{first_name}}`, `{{last_name}}` and `{{city}}`.
+- **Segments.** The DSL is described in [DECISIONS.md](DECISIONS.md) §20.
+- **Errors.** An invalid draft gets 422 with every problem, e.g.
+  `{"error": "invalid_campaign", "problems": [{"field": "content.sms.body", "problem": "too_long"}]}`.
+  Other errors are `{"error": "<code>"}`: `not_found`, `not_draft`, `malformed_json`,
+  `body_too_large`.
+- **No sending or scheduling yet.** Nothing schedules or sends a campaign until those
+  capabilities exist.
+
 ## Project layout
 
 ```
 cmd/api/                  API entry point: wiring and graceful shutdown
 cmd/seed/                 one-shot seeder: migrations, then demo data into an empty database
+internal/campaign/        Campaign context: drafts, lifecycle, segment DSL, REST API
 internal/customer/        Customer context: customers, contact details, permissions, cities
 internal/commerce/        Commerce context: products, baskets, orders
 internal/seed/            deterministic synthetic data: catalogue, people, personas
@@ -104,7 +142,7 @@ internal/platform/        cross-cutting technical code (no business rules)
   database/               GORM connection pool, batch inserts, migrations on startup;
                           databasetest/ gives integration tests a throwaway database
   health/                 liveness and readiness probes
-  httpserver/             router, middleware, server lifecycle
+  httpserver/             router, middleware, JSON helpers, server lifecycle
 migrations/               versioned SQL migrations (goose), embedded in the binary; schema tests
 frontend/                 Vue 3 + TypeScript + Vite app, its Dockerfile and nginx config
 compose.yaml              postgres, seed (one-shot), api, web
@@ -137,3 +175,9 @@ Deliberately left out so far; each phase review adds what it defers.
 - [ ] **A precomputed segmentation profile** (materialized view), if segment queries become slow.
 - [ ] **A separate migration job in production,** with a DDL role, so the API can run with a
       DML-only role ([DECISIONS.md](DECISIONS.md) §6).
+- [ ] **Segment-aware SMS limits.** Count GSM-7 and UCS-2 message segments instead of 160
+      characters: Turkish letters force UCS-2, which fits 70 characters per message.
+- [ ] **Optimistic locking for campaign drafts.** Concurrent edits are last-write-wins today.
+- [ ] **Pagination for the campaign list.**
+- [ ] **A shared error framework** with stable codes, translations and HTTP mapping at the API
+      boundary. Error bodies are local to each capability's handlers today.
