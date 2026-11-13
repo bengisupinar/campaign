@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/bengisupinar/campaign/internal/campaign"
 	"github.com/bengisupinar/campaign/internal/platform/config"
 	"github.com/bengisupinar/campaign/internal/platform/database"
 	"github.com/bengisupinar/campaign/internal/platform/health"
@@ -59,6 +61,9 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	router := httpserver.NewRouter(logger, health.LivenessPath, health.ReadinessPath)
 	router.Get(health.LivenessPath, probes.Live)
 	router.Get(health.ReadinessPath, probes.Ready)
+
+	campaigns := campaign.NewService(campaign.NewStore(db), time.Now)
+	router.Mount("/api/campaigns", campaign.NewHandler(campaigns, logger))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.HTTPAddr)
