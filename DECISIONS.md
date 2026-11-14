@@ -3,8 +3,8 @@
 Each entry records the context, the decision and its consequences. Entries are appended as
 the project evolves; a superseded decision is marked as such rather than deleted.
 Phase 1 (project foundation, entries 1–12) and Phase 2A (customer and commerce, 13–17)
-decisions were recorded on 2026-11-13; Phase 2B (seeding, 18), Phase 3 (campaigns, 19–21) and
-Phase 4 (segmentation, 22–23) on 2026-11-14.
+decisions were recorded on 2026-11-13; Phase 2B (seeding, 18), Phase 3 (campaigns, 19–21),
+Phase 4 (segmentation, 22–23) and Phase 5 (delivery, 24–26) on 2026-11-14.
 
 ## 1. One repository: Go module at the root, Vue app in `frontend/`
 
@@ -166,6 +166,8 @@ producer or consumer.
 
 **Consequences.** Either way delivery is at-least-once, so each send needs an idempotency key
 per (campaign, recipient).
+
+*Settled by decision 24:* the PostgreSQL-backed option, with River.
 
 ## 12. Tooling
 
@@ -482,15 +484,211 @@ cost time in proportion to the customers that reach them; at 100 times the data 
 take seconds and justify the candidates. To repeat the measurement, run
 `go test -run '^$' -bench . ./internal/segmentation` with `TEST_DATABASE_URL` set.
 
+## 24. Job queue: River on PostgreSQL, worked by one process
+
+**Context.** Approved campaigns are sent asynchronously, scheduled ones at their time.
+Decision 11 left the queue open between a PostgreSQL-backed queue and Redis Streams. The
+providers allow 100 requests per second per channel.
+
+**Decision.**
+
+- **River** (riverqueue/river v0.51.2) runs on the existing PostgreSQL, through its
+  `database/sql` driver on GORM's pool.
+  - That driver can't LISTEN, so River runs in poll-only mode; it polls every 200 ms.
+  - The API inserts a dispatch job in the same transaction as the campaign's status change
+    (`InsertTx` on GORM's `*sql.Tx`), so there is no dual write and no outbox.
+  - A scheduled campaign is a River job with `ScheduledAt`; nothing polls for due campaigns.
+    River's scheduler promotes due jobs every 5 s, so a campaign starts within about 5 s of
+    its time.
+- **River's own migrator migrates its tables** (`rivermigrate`), right after goose, in
+  `database.Migrate`; seed and api call it.
+  - **Compared with copying River's SQL into goose files:** there is no SQL to copy and keep in
+    step, and River's migrations are tested and versioned. The cost is one documented exception
+    to "only goose", and River's own `river_migration` table.
+  - **The worker doesn't migrate.** It checks River's schema at start (`CheckQueueSchema`) and
+    refuses to run on an outdated one.
+  - **Upgrading River:**
+    1. bump `river` and `riverdatabasesql` together;
+    2. read River's changelog for migration notes;
+    3. run `make test-integration`, whose throwaway databases run the migrations;
+    4. deploy: seed and api migrate before the worker restarts and checks.
+- **One worker process.** `cmd/worker`, its own Compose service, works the jobs; the API only
+  inserts them. There are three queues: `email` and `sms` with 20 workers each, and `default`
+  (dispatches and receipts) with 10.
+- **Rate limits live in the worker.**
+  - There is one token bucket per channel (`golang.org/x/time/rate`) at 100 per second with a
+    burst of 1. Calls are at least 10 ms apart, so no second holds more than 100.
+  - The worker waits on it immediately before each provider call, retries included.
+  - Concurrency (calls in flight) and rate (calls started per second) are separate settings.
+- **Exactly one worker may run.** Each process has its own limiters, so a second replica would
+  double every limit. Multiple active replicas are not supported. They wouldn't add
+  throughput either, since the rate limit is the bottleneck.
+- **The worker owns the retry budget.**
+  - **River's behaviour, read in its source:**
+    - a job whose last attempt errs or panics is discarded, after its error handler and
+      outside any transaction;
+    - a job rescued after a crash with no attempts left is discarded without any hook.
+
+    So no hook can record a failure together with the discard.
+  - **The budget.** Each message gets 5 provider attempts (`maxSendAttempts`), while River
+    keeps its default of 25.
+  - **Attempt 5.** A transient failure on attempt 5 fails the message in its completion
+    transaction and ends the job normally.
+  - **Later runs.** Any later run, which only follows a crash or panic during attempt 5,
+    records that failure without calling the provider.
+  - **The guarantee.** A send job therefore ends only after its message has an outcome. River
+    could discard one only after 20 further failed attempts to record it, spread over weeks of
+    backoff.
+  - **Rescue.** A crashed worker's jobs are rescued after 10 minutes, longer than any job's
+    timeout; a graceful stop returns interrupted jobs at once.
+
+**Consequences.**
+
+- **No new infrastructure.** The queue, the schedule and the delivery records live in
+  PostgreSQL, and jobs commit with the data they act on.
+- **Sending beyond one process** would need a shared limiter, such as a token bucket in
+  PostgreSQL. The providers cap throughput anyway.
+- **Latency.** Polling adds up to 200 ms when the worker is idle, and River's scheduler up to
+  5 s for scheduled jobs and receipts.
+
+## 25. Delivery: one message per recipient and channel, short transactions, idempotent providers
+
+**Decision.**
+
+- **Preparation in one transaction.**
+  - **Steps.** A dispatch job:
+    1. locks the campaign, and starts it if it is scheduled (its `AsOf` is `started_at`);
+    2. reads the audience with `segmentation.Recipients` on the same transaction;
+    3. inserts one `pending` delivery per recipient and channel;
+    4. inserts each delivery's send job into its channel's queue.
+
+    All of it commits together. No send runs before every delivery exists, so "nothing
+    pending" can't come early, and a failed preparation leaves nothing behind.
+  - **Measured.** On the seeded data, every customer on both channels (3,552 recipients,
+    4,546 deliveries and jobs) takes about 280 ms (265–291 ms over five runs; 404 ms on the
+    running stack). That is about 60 µs per message.
+  - **Scaling limit.** The transaction grows with the audience and holds the campaign's row
+    lock throughout. A million messages would take about a minute in one transaction, so
+    audiences in the hundreds of thousands need batched preparation with a checkpoint (README).
+- **Short completion transactions.**
+  - **When.** A message's outcome is recorded after the provider call, never during it.
+  - **How.** The transaction locks the campaign row first and records the outcome only if
+    the message is still pending. If nothing is pending any more, it marks the campaign
+    `sent`.
+  - **Why it is safe.** The completions of one campaign run one after another, so the last
+    one always sees that nothing is pending. Without the lock, a test left a campaign stuck in
+    `sending` in its first round. Every transaction locks the campaign before its deliveries,
+    so none can deadlock.
+- **Duplicate prevention, one layer per failure:**
+  - the campaign's conditional transition (`WHERE status = 'draft'`);
+  - the dispatch job inserted in that same transaction;
+  - River's unique jobs: one dispatch per campaign, one send per delivery, one receipt per
+    provider message;
+  - the `UNIQUE (campaign_id, customer_id, channel)` key, with `ON CONFLICT DO NOTHING`;
+  - conditional status updates (`WHERE status = 'pending'`, or `'accepted'` for receipts);
+  - the delivery's ID as the provider's idempotency key.
+
+  CHECK constraints tie each campaign status to its times, and each message status to its
+  provider ID or reason.
+- **Statuses.**
+  - **Messages:**
+    - `pending` → `accepted` (the provider took it) → `delivered`, or `failed` (`undelivered`)
+      from the receipt;
+    - `pending` → `failed` (`rejected`, `too_long`, `provider_unavailable`);
+    - `pending` → `skipped`: the permission was revoked or the contact detail is gone,
+      checked again just before sending.
+  - **A campaign is `sent`** when every provider send attempt has reached a terminal business
+    outcome: accepted, failed or skipped. It doesn't wait for delivery; receipts keep updating
+    messages afterwards.
+  - **A campaign is `failed`** when its segment no longer validates as its dispatch starts;
+    its job is then cancelled.
+- **Rendering.** Placeholders are filled from the customer's current details. A rendered SMS
+  over 160 characters fails as `too_long` (decision 21).
+- **Mock providers, in process.**
+  - **The interface.** They sit behind a `provider` interface (`Send` with an idempotency key)
+    that knows nothing of River or receipts.
+  - **Durable answers.** The mock keeps the first answer to each key in
+    `mock_provider_messages`, standing in for a provider's database. A repeated call gets the
+    same answer, even after a restart.
+  - **Receipts.** On acceptance it schedules its receipt as a River job, in the same
+    transaction. The job stands in for a webhook.
+  - **Determinism.** Its behaviour is a pure function of the key (FNV-1a modulo 100):
+    - 1 % rejected;
+    - 1 % accepted but answering too late on the first attempt;
+    - 2 % busy once;
+    - 2 % undelivered;
+    - the rest delivered.
+
+    Latencies and receipt delays are fixed per channel. Tests use scripted fakes.
+
+**Limits of exactly-once.**
+
+- **At least once.** Delivery is at least once, with idempotency. A retry after a crash
+  between the provider's acceptance and our commit, or after a timeout, repeats the call.
+- **What prevents a second message** is only the provider honouring the idempotency key, for a
+  limited time (typically about a day). A provider without idempotency keys would send twice
+  in exactly that gap.
+- **Carriers and receipts.** Carriers can duplicate SMS, and receipts can be late, missing or
+  wrong, so `delivered` is best effort.
+- **Observed.** The end-to-end run, with the worker restarted mid-send, matched every provider
+  acceptance with exactly one message.
+
+## 26. Dispatch and progress API
+
+**Decision.**
+
+- **`POST /api/campaigns/{id}/dispatch`.**
+  - **Body.** Optional: `{"scheduled_at": "…"}`, RFC 3339, in the future and at most a year
+    ahead. No body means now.
+  - **Behaviour.** It checks the segment's names again, then saves the transition and queues
+    the job in one transaction.
+  - **Answers:**
+    - `202` with the campaign and `Location: /api/campaigns/{id}/delivery`;
+    - `409 already_dispatched` for any campaign past the draft stage, which includes all but
+      one of several concurrent requests;
+    - `404`;
+    - `422 invalid_campaign`.
+- **No approval precondition yet.** A draft edited after review is sent as edited (README,
+  further improvements: `If-Match`).
+- **Dispatch status is on the campaign:** `status`, `scheduled_at`, `started_at`,
+  `finished_at`.
+- **`GET /api/campaigns/{id}/delivery`** is the campaign's progress snapshot:
+  - the status and times;
+  - the number of recipients;
+  - message counts by status, overall and per channel;
+  - `final`, true once the campaign is sent or failed and no message is pending or awaiting a
+    receipt.
+- **`GET /api/campaigns/{id}/delivery/events`** streams server-sent events, which answers the
+  open question of real-time status.
+  - **Updates.** A stream re-reads the snapshot every second, sends it when it changed, and
+    pings every 15 s. It extends its write deadline for each write.
+  - **Ending.** It ends when the client leaves or the server shuts down. Otherwise it ends
+    with a `done` event exactly when the snapshot becomes final; a draft gets one snapshot and
+    `done`. Clients close their EventSource on `done`, since it would otherwise reconnect.
+  - **Proxying.** `X-Accel-Buffering: no` keeps nginx from buffering it.
+  - **Scaling.** Each stream reads the database, so several API instances need no
+    LISTEN/NOTIFY.
+- **Routing.** The delivery capability serves its routes, mounted beside the campaign API in
+  `cmd/api`.
+
+**Consequences.**
+
+- **No authentication**, outside the assessment's scope: anyone who reaches the API can
+  dispatch.
+- **Not built yet:** unscheduling and cancelling, cross-campaign statistics and receipt
+  timeouts (README, further improvements).
+
 ## Open questions for later phases
 
 - **LLM without an API key:** select the mock provider when `ANTHROPIC_API_KEY` is empty, so the
   single command keeps working.
 - **Segmentation rules:** answered by decisions 20 and 22: a whitelisted DSL validated on
   save, compiled to parameterised queries.
-- **Real-time status:** SSE versus WebSockets; fan-out across instances (LISTEN/NOTIFY) if the API scales out.
+- **Real-time status:** answered by decision 26: server-sent events, each stream reading the
+  database, so several API instances need no LISTEN/NOTIFY.
 - **Seed data:** answered by decision 18, a one-shot, idempotent Compose service that runs
   before the API.
-- **Mock provider:** a separate Compose service versus an in-process adapter.
+- **Mock provider:** answered by decision 25: in-process adapters in the worker, with
+  durable idempotency in their own table.
 - **What "haven't purchased" means** in a segment: answered by decision 20. It means "never" or
   "not within N days", while "not since the basket add" isn't expressible in DSL version 1.

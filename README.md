@@ -5,13 +5,14 @@ language; an LLM proposes audience segmentation rules and SMS/email content; peo
 edit and approve it; approved campaigns are sent asynchronously to synthetic users through
 mock providers, and delivery status is tracked in real time.
 
-> **Status — Phase 4 (segmentation engine).** On top of the Phase 1 foundation (PostgreSQL,
+> **Status — Phase 5 (delivery).** On top of the Phase 1 foundation (PostgreSQL,
 > migrations, health probes, structured logs, graceful shutdown, and a web app showing the
 > API's readiness), the customer and commerce model holds 5,000 synthetic customers and their
-> shopping activity. Marketers can manage campaign drafts through the REST API. The
-> segmentation engine compiles a draft's segment into parameterised SQL and counts or lists
-> the customers it reaches on each channel. Saving a draft checks that the cities, categories
-> and countries it names exist. AI, sending and scheduling arrive in later phases.
+> shopping activity. Marketers manage campaign drafts through the REST API, and the
+> segmentation engine turns a draft's segment into the customers it reaches on each channel.
+> A draft is dispatched now or at a scheduled time. A worker then sends it through mock SMS
+> and email providers at 100 messages per second per channel, and its progress streams live
+> as server-sent events. AI and the frontend arrive in later phases.
 
 ## Quick start
 
@@ -53,6 +54,7 @@ cp .env.example .env     # host settings: DATABASE_URL, text logs, ...
 make db                  # PostgreSQL in Docker
 make seed                # demo data, once (applies migrations; skips a seeded database)
 make run                 # API on :8080 (applies migrations on startup)
+make worker              # sends dispatched campaigns; run exactly one
 
 make web-install         # once
 make web-dev             # Vite on http://localhost:5173, proxying /api and /readyz to :8080
@@ -64,19 +66,21 @@ make web-dev             # Vite on http://localhost:5173, proxying /api and /rea
 |---|---|
 | `make up` / `make down` / `make logs` | Full stack in Docker, waiting until it is healthy |
 | `make test` | Go tests with the race detector |
-| `make test-integration` | Also runs the database tests (schema, stores, seeding, segmentation) against PostgreSQL, in throwaway databases (needs `make db` and a `.env`) |
+| `make test-integration` | Also runs the database tests (schema, stores, seeding, segmentation, delivery) against PostgreSQL, in throwaway databases (needs `make db` and a `.env`) |
 | `make seed` | Fill an empty database with the demo data |
+| `make worker` | The delivery worker. Exactly one may run: the per-channel rate limits live in its process |
 | `make lint` / `make fmt` | golangci-lint v2 (built into `./bin` on first use) / formatting |
 | `make migrate-new name=create_campaigns` | Create the next SQL migration |
 | `make migrate-status` / `migrate-up` / `migrate-down` | Inspect or move the schema version |
 | `make web-test` / `web-lint` / `web-build` | Frontend unit tests, lint + type-check, production build |
 | `make check` | Every Go and frontend check that needs no database |
 
-To time the segment queries on the seeded dataset, after `make db`:
+To time the segment queries and the preparation of a campaign on the seeded dataset, after
+`make db`:
 
 ```sh
 TEST_DATABASE_URL='postgres://campaign:campaign@localhost:5432/campaign?sslmode=disable' \
-  go test -run '^$' -bench . ./internal/segmentation
+  go test -run '^$' -bench . ./internal/segmentation ./internal/delivery
 ```
 
 ## Configuration
@@ -136,31 +140,64 @@ curl -X POST localhost:3000/api/campaigns -d '{
   least 1,000 TRY in the last 90 days.
 - **Errors.** An invalid draft gets 422 with every problem, e.g.
   `{"error": "invalid_campaign", "problems": [{"field": "content.sms.body", "problem": "too_long"}]}`.
-  Other errors are `{"error": "<code>"}`: `not_found`, `not_draft`, `malformed_json`,
-  `body_too_large`.
-- **No sending or scheduling yet.** Nothing schedules or sends a campaign until those
-  capabilities exist.
+  Other errors are `{"error": "<code>"}`: `not_found`, `not_draft`, `already_dispatched`,
+  `malformed_json`, `body_too_large`.
+
+### Dispatch and delivery progress
+
+| Request | Result |
+|---|---|
+| `POST /api/campaigns/{id}/dispatch` | 202 and the campaign, now `sending` or `scheduled`, with `Location` pointing at its progress; 409 `already_dispatched` unless it is a draft; 422 for a bad `scheduled_at` or names that no longer exist |
+| `GET /api/campaigns/{id}/delivery` | 200 and a progress snapshot |
+| `GET /api/campaigns/{id}/delivery/events` | Server-sent events: the snapshot each time it changes, then a `done` event once it is final |
+
+```sh
+curl -X POST localhost:3000/api/campaigns/1/dispatch                       # send now
+curl -X POST localhost:3000/api/campaigns/1/dispatch \
+  -d '{"scheduled_at": "2026-11-20T09:00:00+03:00"}'                        # or schedule
+curl -N localhost:3000/api/campaigns/1/delivery/events                     # follow it
+```
+
+- **Campaign statuses.**
+  - `scheduled` until its time.
+  - `sending`, then `sent` once every message has an outcome: accepted by its provider,
+    failed or skipped. `sent` doesn't mean delivered.
+  - `failed` if its segment no longer validates when its dispatch starts.
+
+  The campaign shows `scheduled_at`, `started_at` and `finished_at`.
+- **Message statuses.**
+  - `pending`, then `accepted` by the provider, then `delivered` or `failed` when the
+    provider's receipt arrives, possibly after the campaign is `sent`.
+  - `failed` also covers rejected, too long, and the provider unavailable after 5 attempts.
+  - `skipped` means the customer withdrew permission or lost the contact detail before
+    sending.
+- **The snapshot** counts messages by status, overall and per channel. Its `final` is true
+  once nothing can change. Close the `EventSource` on `done`, or it reconnects.
+- **Exactly once?** Retries carry an idempotency key, so a message reaches its provider once.
+  [DECISIONS.md](DECISIONS.md) §25 explains the limits.
 
 ## Project layout
 
 ```
 cmd/api/                  API entry point: wiring and graceful shutdown
 cmd/seed/                 one-shot seeder: migrations, then demo data into an empty database
-internal/campaign/        Campaign context: drafts, lifecycle, segment DSL, REST API
+cmd/worker/               delivery worker: works the River jobs; exactly one may run
+internal/campaign/        Campaign context: drafts, lifecycle, dispatch, segment DSL, REST API
 internal/customer/        Customer context: customers, contact details, permissions, cities
 internal/commerce/        Commerce context: products, baskets, orders
 internal/segmentation/    segment engine: references, DSL → parameterised SQL, audience counts
                           and recipient batches per channel
+internal/delivery/        sending: River jobs, mock providers, rate limits, progress and SSE
 internal/seed/            deterministic synthetic data: catalogue, people, personas
 internal/platform/        cross-cutting technical code (no business rules)
   config/                 environment configuration, logger
-  database/               GORM connection pool, batch inserts, migrations on startup;
-                          databasetest/ gives integration tests a throwaway database
+  database/               GORM connection pool, batch inserts, migrations on startup (goose,
+                          then River's); databasetest/ gives integration tests a throwaway database
   health/                 liveness and readiness probes
   httpserver/             router, middleware, JSON helpers, server lifecycle
 migrations/               versioned SQL migrations (goose), embedded in the binary; schema tests
 frontend/                 Vue 3 + TypeScript + Vite app, its Dockerfile and nginx config
-compose.yaml              postgres, seed (one-shot), api, web
+compose.yaml              postgres, seed (one-shot), api, worker (exactly one), web
 ```
 
 Each business capability is a single package, `internal/<capability>`. See
@@ -198,6 +235,30 @@ Deliberately left out so far; each phase review adds what it defers.
 - [ ] **Segment-aware SMS limits.** Count GSM-7 and UCS-2 message segments instead of 160
       characters: Turkish letters force UCS-2, which fits 70 characters per message.
 - [ ] **Optimistic locking for campaign drafts.** Concurrent edits are last-write-wins today.
+- [ ] **Dispatch exactly what was reviewed.** Dispatch could take the version the reviewer
+      approved (`If-Match` with the campaign's ETag) and answer 412 if the draft changed since.
+      Today an edit made after review is sent as edited.
+- [ ] **Unschedule and cancel.** The lifecycle allows scheduled → draft, but no endpoint does it
+      yet, and a dispatch in progress can't be stopped.
+- [ ] **Receipt timeout.** A real provider can lose a receipt, which would leave its message
+      `accepted` and the progress never final.
+- [ ] **Cross-campaign delivery statistics,** for a dashboard; statistics are per campaign today.
+- [ ] **Real providers,** with receipts by webhook instead of the mocks' scheduled jobs.
+- [ ] **More than one worker,** with a rate limiter shared through PostgreSQL. Exactly one worker
+      may run today, because each worker process holds its own limiters
+      ([DECISIONS.md](DECISIONS.md) §24).
+- [ ] **Batched preparation** with a checkpoint, for audiences in the hundreds of thousands. One
+      transaction prepares a campaign today, about 60 µs per message (§25).
+- [ ] **Campaign completion without a lock per message.** Each message's outcome is recorded in
+      a transaction that locks its campaign and checks for pending messages, so one campaign's
+      outcomes are recorded one at a time: enough for 100 messages a second per channel, a
+      ceiling at much higher rates. One completion job per campaign, re-checking until nothing
+      is pending, could take that work off every message without letting a campaign stay
+      `sending` ([DECISIONS.md](DECISIONS.md) §25).
+- [ ] **Metrics** (`/metrics`) for sending throughput, failures and queue depth; logs and
+      River's job table are the only view today.
+- [ ] **Authentication and authorization,** such as who may dispatch. They are outside the
+      assessment's scope: anyone who reaches the API can send a campaign.
 - [ ] **Pagination for the campaign list.**
 - [ ] **A shared error framework** with stable codes, translations and HTTP mapping at the API
       boundary. Error bodies are local to each capability's handlers today.

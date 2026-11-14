@@ -6,6 +6,127 @@ snapshots taken when a phase is finished; later phases add entries rather than r
 ones. The reasoning behind each choice is in [DECISIONS.md](DECISIONS.md), setup and commands
 are in [README.md](README.md).
 
+## Phase 5: Delivery, dispatch API and live progress (2026-11-14)
+
+**Scope.** Dispatched campaigns are sent asynchronously through mock SMS and email providers,
+with progress served as snapshots and server-sent events.
+
+- **Dispatch.** One endpoint, `POST /api/campaigns/{id}/dispatch`: no `scheduled_at` means now.
+- **Queue.** River on PostgreSQL, with native scheduled jobs and no cron.
+- **Worker.** Exactly one worker process, with separate `sms` and `email` queues and a rate
+  limiter for each, at 100 provider calls per second.
+- **Transactions.**
+  - Deliveries and their send jobs are created in one transaction.
+  - Completion transactions are short and lock the campaign first.
+  - The worker owns the retry budget.
+- **Mock providers.** Durable idempotency, behaviour that depends only on the key, and delayed
+  receipts.
+- **Progress.** A per-campaign snapshot and an SSE stream.
+
+Decisions taken while planning and in two review rounds:
+
+- one dispatch endpoint; no approval precondition for now (README);
+- SSE; statistics per campaign;
+- River's native scheduling;
+- conditional transitions, 409 when already dispatched, constraints for idempotency;
+- a separate worker; in-process mocks; delayed receipts;
+- the worker owns the retry budget;
+- River's own migrator for its tables;
+- `sent` means every send attempt has a terminal outcome, not that every message was
+  delivered;
+- no authentication.
+
+Not built yet: unscheduling and cancelling, cross-campaign statistics, receipt timeouts,
+real providers, metrics, AI and the frontend.
+
+**Result.**
+
+- `make check` and `make test-integration`, with `-race`, pass.
+- **End to end through nginx,** a campaign was:
+  - dispatched;
+  - streamed until `done`;
+  - sent at 100 messages per second per channel, with a worker restart mid-send;
+  - started at its scheduled time, by River alone.
+- **No duplicates.** Every provider acceptance matched exactly one message.
+
+### How the pieces fit
+
+```text
+POST /dispatch ─► campaign.Service.Dispatch ─► Store.Dispatch: one transaction
+                     (names checked again)          UPDATE … WHERE status = 'draft'  (else 409)
+                                                    + River InsertTx(dispatch, ScheduledAt)
+                                                              │  River (PostgreSQL)
+                                                              ▼
+worker ─ default queue ─► dispatch job: one transaction: lock campaign → Start if scheduled →
+                          segmentation.Recipients → deliveries (pending) + send jobs per channel
+       ─ sms / email ───► send job: message + permission now → rate limiter → provider.Send
+                          (no lock held) → completeMessage: lock campaign → record outcome →
+                          nothing pending? Finish → sent
+       ─ default queue ─► receipt job (scheduled by the mock on acceptance): accepted → delivered | failed
+GET …/delivery, …/delivery/events ─► snapshot: campaign + counts by channel and status (SSE: every 1 s)
+```
+
+### Components
+
+| Component | Location | What it does | Tests |
+|---|---|---|---|
+| Lifecycle | `internal/campaign/campaign.go` | `sent` and `failed`; `Dispatch`, `Start`, `Finish`, `Fail`; the three times | Transition table; 8 dispatch and 7 move cases |
+| Rendering | `internal/campaign/content.go` | `Fill`; the one list of placeholders; `MaxSMSLength` exported for delivery | 4 cases |
+| Dispatch | `internal/campaign` (`service.go`, `store.go`, `http.go`) | Names checked again; transition and job in one transaction; `Lock` and `Transition` for delivery | 11 API cases; store rollback and transitions |
+| Schema | `migrations/00005_delivery.sql` | Campaign times and statuses; `deliveries`; `mock_provider_messages`; consistency CHECKs | 12 new constraint cases; round trip |
+| River migrations | `internal/platform/database` | goose, then River's migrator; `CheckQueueSchema`; `SQLTx` | Every integration test runs them |
+| Delivery | `internal/delivery` (`delivery.go`, `jobs.go`, `store.go`, `worker.go`) | Queue, dispatch, send and receipt jobs, completion, limits, worker | See verification |
+| Mock providers | `internal/delivery/mock.go` | Durable idempotency, deterministic behaviour, receipts in the same transaction | 3 tests |
+| Progress | `internal/delivery/http.go` | Snapshot and SSE | 2 tests, 3 SSE cases |
+| Worker | `cmd/worker`, `compose.yaml`, Makefile | Exactly one; checks River's schema; stops gracefully | Running stack |
+
+Coverage: `internal/delivery` is 79.3 % with PostgreSQL and 2.2 % without (almost all of its
+behaviour needs the database); `internal/campaign` is 77.1 % and 93.1 %.
+
+### Verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `make check` | Pass: Go tests with `-race`, lint with 0 issues, frontend tests (6) and build |
+| 2 | `make test-integration`, with `-race` | Pass:<br>• 20 concurrent dispatches: one succeeds, one job;<br>• preparation failing on its second batch leaves nothing, and a retry creates exactly one send job per delivery in its channel's queue;<br>• a scheduled dispatch runs once a late worker starts;<br>• a segment that stopped validating fails the campaign and cancels the job;<br>• 200 messages completing at once, 20 times: always `sent`;<br>• rate limit: 101 consecutive calls always span a second, retries counted, per channel;<br>• a hanging SMS provider leaves email unaffected;<br>• retry exhaustion fails the message, including the run after a crash;<br>• mock idempotency across instances, and identical scenarios on two databases;<br>• snapshot and SSE until `done`, on leaving and on shutdown |
+| 3 | Mutation check | Each fails its test: completion without the campaign lock (stuck in `sending` in round 0); no rate limiter (101 calls in 481 ms); a provider call past the budget |
+| 4 | Preparation benchmark | Every seeded customer on both channels, 4,546 deliveries and jobs, in one transaction: 265–291 ms (about 60 µs per message) |
+| 5 | Running stack, through nginx | **The Phase 2A example on both channels:** `202` with `Location`; 6 snapshots, then `done`; `sent` 2.3 s after dispatch; 125 delivered, 1 rejected, 7 undelivered; 132 acceptances in both our records and the mock's.<br>**Ten parallel dispatches:** one `202`, nine `409`, one job.<br>**Every customer (4,546 messages), worker restarted mid-send:** about 190 messages/s; `sent` after 32.5 s; 4,512 provider IDs, matching 4,512 mock acceptances; all 4,546 send jobs completed.<br>**A dispatch scheduled for 18:04:30:** started at 18:04:30.027, `sent` at 18:04:34 |
+
+### Deviations from the plan
+
+- **`Start` only starts a scheduled campaign.** `CanBecome` allows draft → sending (dispatch
+  now), so `Start` would have started a draft, bypassing `Dispatch`'s checks. A test caught it.
+- **Dispatch locks through its conditional update.** The API path relies on
+  `UPDATE … WHERE status = 'draft'` taking the row lock, rather than a `SELECT … FOR UPDATE`
+  first. Concurrent requests still serialise, and the losers get 409.
+- **Early receipts.** A receipt that arrives before its message's acceptance is recorded is
+  retried a bounded 5 times, rather than snoozed without limit; an unknown message's receipt
+  is dropped.
+- **No rule defined twice.** `MaxSMSLength` is exported from `campaign` for the rendered
+  check, and placeholder names live in one function that validation and `Fill` share.
+- **Mock receipts.** The mocks insert receipt jobs through their own insert-only River client,
+  so River stays inside the mock.
+
+### Worth a closer look
+
+- **Exactly one worker** is documented and configured, not enforced at run time. Scaling the
+  Compose service would double the rate limits.
+- **One preparation transaction** grows with the audience: about 60 µs per message, holding
+  the campaign row lock throughout.
+- **River's scheduler runs every 5 s,** so scheduled dispatches and receipts can start up to
+  5 s late; polling adds up to 200 ms when the worker is idle.
+- **Lost receipts.** A real provider's lost receipt would leave its message `accepted` and the
+  progress never final; a receipt timeout is a further improvement.
+- **`sent` isn't delivered.** Receipts can change messages after the campaign is `sent`.
+- **No approval precondition.** An edit made after review is dispatched as edited (`If-Match`
+  is a further improvement).
+- **Exactly once** holds only as far as the provider honours idempotency keys
+  ([DECISIONS.md](DECISIONS.md) §25).
+- **The mock's table** lives in the application database; drop it with real providers.
+- **River's unique jobs** only last while job rows exist (24 h for completed ones). After that,
+  our own constraints are the guard.
+
 ## Phase 4: Segmentation engine (2026-11-14)
 
 **Scope.**
