@@ -7,12 +7,13 @@ import (
 	"github.com/bengisupinar/campaign/internal/customer"
 )
 
-const (
-	// maxSMSLength is the length of one GSM-7 text message. Turkish letters such as ş and ğ
-	// switch a message to UCS-2, where one message holds only 70 characters (DECISIONS.md).
-	maxSMSLength          = 160
-	maxEmailSubjectLength = 80
-)
+// MaxSMSLength is the length of one GSM-7 text message: the limit of an SMS template as
+// written, and of each message once delivery fills in its placeholders. Turkish letters such
+// as ş and ğ switch a message to UCS-2, where one message holds only 70 characters
+// (DECISIONS.md).
+const MaxSMSLength = 160
+
+const maxEmailSubjectLength = 80
 
 // Content is a campaign's message for each channel it uses. A nil block means the channel
 // isn't used, so a campaign can never target a channel it has no message for.
@@ -50,7 +51,7 @@ func (c Content) validate(ps *problems) {
 		return
 	}
 	if c.SMS != nil {
-		checkText(ps, "content.sms.body", c.SMS.Body, maxSMSLength)
+		checkText(ps, "content.sms.body", c.SMS.Body, MaxSMSLength)
 	}
 	if c.Email != nil {
 		checkText(ps, "content.email.subject", c.Email.Subject, maxEmailSubjectLength)
@@ -61,6 +62,57 @@ func (c Content) validate(ps *problems) {
 func (c Content) clone() Content {
 	c.SMS, c.Email = clonePtr(c.SMS), clonePtr(c.Email)
 	return c
+}
+
+// Values are what one recipient's message fills its placeholders with.
+type Values struct {
+	FirstName string
+	LastName  string
+	City      string
+}
+
+// value returns what a placeholder name stands for, and whether it is a placeholder at all.
+// It is the only list of placeholders: validation and Fill both read it.
+func (v Values) value(name string) (string, bool) {
+	switch name {
+	case "first_name":
+		return v.FirstName, true
+	case "last_name":
+		return v.LastName, true
+	case "city":
+		return v.City, true
+	default:
+		return "", false
+	}
+}
+
+func isPlaceholder(name string) bool {
+	_, ok := Values{}.value(name)
+	return ok
+}
+
+// Fill replaces each placeholder in text, which must be valid content, with v's value.
+func Fill(text string, v Values) string {
+	var b strings.Builder
+	for {
+		open := strings.Index(text, "{{")
+		if open < 0 {
+			break
+		}
+		end := strings.Index(text[open+2:], "}}")
+		if end < 0 {
+			break
+		}
+		b.WriteString(text[:open])
+		if value, ok := v.value(strings.TrimSpace(text[open+2 : open+2+end])); ok {
+			b.WriteString(value)
+		} else {
+			b.WriteString(text[open : open+2+end+2]) // not a placeholder: kept as written
+		}
+		text = text[open+2+end+2:]
+	}
+	b.WriteString(text)
+	return b.String()
 }
 
 // checkText requires text, applies a length limit when there is one, and checks the
@@ -97,11 +149,10 @@ func checkPlaceholders(ps *problems, field, text string) {
 			malformed = true
 			break
 		}
-		switch name := strings.TrimSpace(rest[open+2 : open+2+end]); name {
-		case "":
+		switch name := strings.TrimSpace(rest[open+2 : open+2+end]); {
+		case name == "":
 			malformed = true
-		case "first_name", "last_name", "city":
-		default:
+		case !isPlaceholder(name):
 			ps.addDetail(field, ProblemUnknownPlaceholder, name)
 		}
 		rest = rest[open+2+end+2:]

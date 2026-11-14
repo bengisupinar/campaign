@@ -3,6 +3,7 @@ package campaign
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -15,8 +16,8 @@ import (
 	"github.com/bengisupinar/campaign/internal/platform/httpserver"
 )
 
-// NewHandler returns the campaign API, to be mounted at /api/campaigns. It only manages
-// drafts: nothing schedules or sends a campaign until delivery exists.
+// NewHandler returns the campaign API, to be mounted at /api/campaigns: drafts, and their
+// dispatch. Delivery progress is served by the delivery capability.
 func NewHandler(svc *Service, logger *slog.Logger) http.Handler {
 	h := &handler{svc: svc, logger: logger}
 	r := chi.NewRouter()
@@ -25,6 +26,7 @@ func NewHandler(svc *Service, logger *slog.Logger) http.Handler {
 	r.Get("/{id}", h.get)
 	r.Put("/{id}", h.update)
 	r.Delete("/{id}", h.delete)
+	r.Post("/{id}/dispatch", h.dispatch)
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	})
@@ -45,8 +47,16 @@ type campaignJSON struct {
 	Status   Status             `json:"status"`
 	Channels []customer.Channel `json:"channels"`
 	Draft
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	ScheduledAt *time.Time `json:"scheduled_at"`
+	StartedAt   *time.Time `json:"started_at"`
+	FinishedAt  *time.Time `json:"finished_at"`
+}
+
+// dispatchJSON is the optional body of a dispatch request: no scheduled_at means now.
+type dispatchJSON struct {
+	ScheduledAt *time.Time `json:"scheduled_at"`
 }
 
 // errorJSON is the body of every error response. Error is a stable code; Problems lists what
@@ -127,6 +137,27 @@ func (h *handler) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// dispatch approves a draft for sending and answers 202: the sending happens in the background,
+// and Location points at its progress.
+func (h *handler) dispatch(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.id(w, r)
+	if !ok {
+		return
+	}
+	var body dispatchJSON
+	if err := httpserver.DecodeJSON(w, r, &body); err != nil && !errors.Is(err, io.EOF) { // no body: send now
+		h.decodeFailed(w, err)
+		return
+	}
+	c, err := h.svc.Dispatch(r.Context(), id, body.ScheduledAt)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Location", fmt.Sprintf("/api/campaigns/%d/delivery", c.ID()))
+	httpserver.WriteJSON(w, http.StatusAccepted, toJSON(c))
+}
+
 // id parses the {id} path parameter. Anything but a positive integer names no campaign.
 func (h *handler) id(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -138,16 +169,19 @@ func (h *handler) id(w http.ResponseWriter, r *http.Request) (int64, bool) {
 }
 
 func (h *handler) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
-	err := httpserver.DecodeJSON(w, r, dst)
-	switch {
-	case err == nil:
-		return true
-	case errors.Is(err, httpserver.ErrBodyTooLarge):
-		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large")
-	default:
-		writeError(w, http.StatusBadRequest, "malformed_json")
+	if err := httpserver.DecodeJSON(w, r, dst); err != nil {
+		h.decodeFailed(w, err)
+		return false
 	}
-	return false
+	return true
+}
+
+func (h *handler) decodeFailed(w http.ResponseWriter, err error) {
+	if errors.Is(err, httpserver.ErrBodyTooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return
+	}
+	writeError(w, http.StatusBadRequest, "malformed_json")
 }
 
 // fail maps a service error to a response. Unexpected errors are logged, never returned.
@@ -160,6 +194,8 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, ErrNotDraft):
 		writeError(w, http.StatusConflict, "not_draft")
+	case errors.Is(err, ErrAlreadyDispatched):
+		writeError(w, http.StatusConflict, "already_dispatched")
 	default:
 		h.logger.ErrorContext(r.Context(), "campaign request failed",
 			slog.String("request_id", middleware.GetReqID(r.Context())),
@@ -175,11 +211,14 @@ func writeError(w http.ResponseWriter, status int, code string) {
 
 func toJSON(c *Campaign) campaignJSON {
 	return campaignJSON{
-		ID:        c.ID(),
-		Status:    c.Status(),
-		Channels:  c.Channels(),
-		Draft:     c.Draft(),
-		CreatedAt: c.CreatedAt(),
-		UpdatedAt: c.UpdatedAt(),
+		ID:          c.ID(),
+		Status:      c.Status(),
+		Channels:    c.Channels(),
+		Draft:       c.Draft(),
+		CreatedAt:   c.CreatedAt(),
+		UpdatedAt:   c.UpdatedAt(),
+		ScheduledAt: nullTime(c.ScheduledAt()),
+		StartedAt:   nullTime(c.StartedAt()),
+		FinishedAt:  nullTime(c.FinishedAt()),
 	}
 }

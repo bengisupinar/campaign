@@ -18,6 +18,10 @@ import (
 func TestSchemaConstraints(t *testing.T) {
 	db := newTestDatabase(t)
 	insertValidRows(t, db)
+	// Campaign 2 is being sent; its SMS to customer 1 was accepted.
+	execute(t, db, `INSERT INTO campaigns (name, status, segment, sms_body, created_at, updated_at, started_at)
+		VALUES ('Sending', 'sending', '{}', 'Hi', now(), now(), now())`)
+	execute(t, db, insertDelivery+`(2, 1, 'sms', 'accepted', 'p-1', NULL, now(), now())`)
 
 	// Each statement breaks exactly one constraint, by colliding with or referring to the
 	// valid rows.
@@ -86,7 +90,31 @@ func TestSchemaConstraints(t *testing.T) {
 		{"campaign names are 1 to 100 characters", insertCampaign +
 			`('', 'draft', '{}', 'Hi', NULL, NULL, now(), now())`, "campaigns_name_check"},
 		{"campaign statuses are known", insertCampaign +
-			`('Sale', 'sent', '{}', 'Hi', NULL, NULL, now(), now())`, "campaigns_status_check"},
+			`('Sale', 'done', '{}', 'Hi', NULL, NULL, now(), now())`, "campaigns_status_check"},
+		{"scheduled campaigns have a time", insertCampaign +
+			`('Sale', 'scheduled', '{}', 'Hi', NULL, NULL, now(), now())`, "campaigns_scheduled_at_check"},
+		{"sending campaigns have started", insertCampaign +
+			`('Sale', 'sending', '{}', 'Hi', NULL, NULL, now(), now())`, "campaigns_started_at_check"},
+		{"sent campaigns have finished", `INSERT INTO campaigns (name, status, segment, sms_body, created_at, updated_at, started_at)
+			VALUES ('Sale', 'sent', '{}', 'Hi', now(), now(), now())`, "campaigns_finished_at_check"},
+
+		{"one message per campaign, customer and channel", insertDelivery +
+			`(2, 1, 'sms', 'pending', NULL, NULL, now(), now())`, "deliveries_campaign_id_customer_id_channel_key"},
+		{"messages go out by email or SMS", insertDelivery +
+			`(2, 1, 'push', 'pending', NULL, NULL, now(), now())`, "deliveries_channel_check"},
+		{"message statuses are known", insertDelivery +
+			`(2, 1, 'email', 'sent', NULL, NULL, now(), now())`, "deliveries_status_check"},
+		{"accepted messages have a provider ID", insertDelivery +
+			`(2, 1, 'email', 'accepted', NULL, NULL, now(), now())`, "deliveries_accepted_check"},
+		{"failed messages have a reason", insertDelivery +
+			`(2, 1, 'email', 'failed', NULL, NULL, now(), now())`, "deliveries_reason_check"},
+		{"provider IDs are unique", insertDelivery +
+			`(2, 1, 'email', 'accepted', 'p-1', NULL, now(), now())`, "deliveries_provider_message_id_key"},
+		{"messages belong to a known campaign", insertDelivery +
+			`(999, 1, 'email', 'pending', NULL, NULL, now(), now())`, "deliveries_campaign_id_fkey"},
+		{"the mock's acceptances have a provider ID", `INSERT INTO mock_provider_messages
+			(idempotency_key, channel, outcome, provider_message_id, attempts, created_at, updated_at)
+			VALUES ('delivery-1', 'sms', 'accepted', NULL, 1, now(), now())`, "mock_provider_messages_accepted_check"},
 		{"segments are JSON objects", insertCampaign +
 			`('Sale', 'draft', '[]', 'Hi', NULL, NULL, now(), now())`, "campaigns_segment_check"},
 		{"campaigns use a channel", insertCampaign +
@@ -161,9 +189,13 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	}
 }
 
-// insertCampaign starts an INSERT into campaigns; the cases add the values.
-const insertCampaign = `INSERT INTO campaigns
+// insertCampaign and insertDelivery start INSERTs; the cases add the values.
+const (
+	insertCampaign = `INSERT INTO campaigns
 	(name, status, segment, sms_body, email_subject, email_body, created_at, updated_at) VALUES `
+	insertDelivery = `INSERT INTO deliveries
+	(campaign_id, customer_id, channel, status, provider_message_id, error, created_at, updated_at) VALUES `
+)
 
 // insertValidRows inserts one valid row per table (two products), all with ID 1 (products 1
 // and 2) in a fresh database.

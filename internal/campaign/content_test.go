@@ -6,6 +6,21 @@ import (
 	"testing"
 )
 
+func TestFill(t *testing.T) {
+	v := Values{FirstName: "Ayşe", LastName: "Yılmaz", City: "İstanbul"}
+	tests := []struct{ text, want string }{
+		{"Merhaba {{first_name}}, sepetin seni bekliyor!", "Merhaba Ayşe, sepetin seni bekliyor!"},
+		{"{{ first_name }} {{last_name}} from {{city}}", "Ayşe Yılmaz from İstanbul"},
+		{"No placeholders", "No placeholders"},
+		{"{{city}}{{city}}", "İstanbulİstanbul"},
+	}
+	for _, tt := range tests {
+		if got := Fill(tt.text, v); got != tt.want {
+			t.Errorf("Fill(%q) = %q, want %q", tt.text, got, tt.want)
+		}
+	}
+}
+
 func TestDraftValidation(t *testing.T) {
 	sms := func(body string) Content { return Content{SMS: &SMS{Body: body}} }
 	email := func(subject, body string) Content { return Content{Email: &Email{Subject: subject, Body: body}} }

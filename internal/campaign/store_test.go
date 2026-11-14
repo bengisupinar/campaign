@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"database/sql"
 	"errors"
 	"reflect"
 	"slices"
@@ -63,7 +64,7 @@ func TestStoreChangesOnlyDrafts(t *testing.T) {
 
 	draft := mustCreate(t, store, validDraft())
 	scheduled := mustCreate(t, store, validDraft())
-	setStatus(t, db, scheduled.ID(), StatusScheduled)
+	schedule(t, db, scheduled.ID())
 
 	// A draft changes and can be deleted.
 	if err := draft.Update(changed, now.Add(time.Hour)); err != nil {
@@ -127,6 +128,64 @@ func TestStoreListsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestStoreDispatchAndTransitions(t *testing.T) {
+	db := databasetest.New(t)
+	store := NewStore(db)
+	ctx := t.Context()
+	c := mustCreate(t, store, validDraft())
+	if err := c.Dispatch(nil, now); err != nil {
+		t.Fatalf("Dispatch(): %v", err)
+	}
+
+	// If the job can't be queued, the dispatch isn't saved either.
+	errQueue := errors.New("queue unavailable")
+	if err := store.Dispatch(ctx, c, func(*sql.Tx) error { return errQueue }); !errors.Is(err, errQueue) {
+		t.Fatalf("store.Dispatch() error = %v, want the queue's", err)
+	}
+	if got, err := store.Get(ctx, c.ID()); err != nil || got.Status() != StatusDraft {
+		t.Fatalf("after the failed dispatch: %v, %v; want still a draft", got.Status(), err)
+	}
+
+	// Otherwise both are saved, in the transaction handed to enqueue.
+	var queuedIn *sql.Tx
+	if err := store.Dispatch(ctx, c, func(tx *sql.Tx) error { queuedIn = tx; return nil }); err != nil {
+		t.Fatalf("store.Dispatch(): %v", err)
+	}
+	got, err := store.Get(ctx, c.ID())
+	if err != nil || queuedIn == nil || got.Status() != StatusSending || !got.StartedAt().Equal(now) {
+		t.Fatalf("after dispatch: %+v, %v (queued in %v); want sending since %v", got, err, queuedIn, now)
+	}
+	if err := store.Dispatch(ctx, c, func(*sql.Tx) error { return nil }); !errors.Is(err, ErrNotDraft) {
+		t.Errorf("second store.Dispatch() error = %v, want ErrNotDraft", err)
+	}
+
+	// Lock and Transition save a lifecycle move, once.
+	finished := now.Add(time.Minute)
+	err = db.Transaction(func(tx *gorm.DB) error {
+		s := NewStore(tx)
+		locked, err := s.Lock(ctx, c.ID())
+		if err != nil {
+			return err
+		}
+		if err := locked.Finish(finished); err != nil {
+			return err
+		}
+		return s.Transition(ctx, locked, StatusSending)
+	})
+	if err != nil {
+		t.Fatalf("finish in a transaction: %v", err)
+	}
+	if got, err := store.Get(ctx, c.ID()); err != nil || got.Status() != StatusSent || !got.FinishedAt().Equal(finished) {
+		t.Errorf("after Finish: %v, finished %v, %v; want sent at %v", got.Status(), got.FinishedAt(), err, finished)
+	}
+	if err := store.Transition(ctx, got, StatusSending); !errors.Is(err, ErrStatusChange) {
+		t.Errorf("Transition from a status the campaign left: error = %v, want ErrStatusChange", err)
+	}
+	if _, err := store.Lock(ctx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Lock(999) error = %v, want ErrNotFound", err)
+	}
+}
+
 func mustNewCampaign(t *testing.T, d Draft) *Campaign {
 	t.Helper()
 	c, err := New(d, now)
@@ -150,9 +209,10 @@ func mustCreate(t *testing.T, store *Store, d Draft) *Campaign {
 
 // setStatus moves a campaign along the lifecycle directly in the database, as a later phase
 // would.
-func setStatus(t *testing.T, db *gorm.DB, id int64, status Status) {
+// schedule moves a draft to scheduled behind the store's back, as a stale copy would not know.
+func schedule(t *testing.T, db *gorm.DB, id int64) {
 	t.Helper()
-	if err := db.Exec("UPDATE campaigns SET status = ? WHERE id = ?", status, id).Error; err != nil {
-		t.Fatalf("set status: %v", err)
+	if err := db.Exec("UPDATE campaigns SET status = ?, scheduled_at = ? WHERE id = ?", StatusScheduled, now.Add(time.Hour), id).Error; err != nil {
+		t.Fatalf("schedule: %v", err)
 	}
 }

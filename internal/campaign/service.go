@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 )
@@ -14,6 +15,9 @@ type repository interface {
 	// Update saves a draft's changes. It fails with ErrNotFound or ErrNotDraft when the stored
 	// campaign is gone or no longer a draft.
 	Update(ctx context.Context, c *Campaign) error
+	// Dispatch saves a draft's dispatch and runs enqueue in the same transaction, failing like
+	// Update.
+	Dispatch(ctx context.Context, c *Campaign, enqueue func(tx *sql.Tx) error) error
 	// Delete removes a draft, failing like Update.
 	Delete(ctx context.Context, id int64) error
 	// Get returns a campaign, or ErrNotFound.
@@ -29,18 +33,53 @@ type referenceChecker interface {
 	CheckReferences(ctx context.Context, s Segment) ([]Problem, error)
 }
 
+// dispatcher queues the job that sends a dispatched campaign, in tx, the transaction that
+// records the dispatch. The delivery capability implements it.
+type dispatcher interface {
+	EnqueueDispatch(ctx context.Context, tx *sql.Tx, c *Campaign) error
+}
+
 // Service runs the campaign use cases. The HTTP handlers use it now, and AI proposals will
 // later, so manual and generated campaigns follow the same rules.
 type Service struct {
 	repo       repository
 	references referenceChecker
+	dispatcher dispatcher
 	now        func() time.Time
 }
 
 // NewService returns a service that stores campaigns in repo, checks segment references with
-// references, and reads the time from now.
-func NewService(repo repository, references referenceChecker, now func() time.Time) *Service {
-	return &Service{repo: repo, references: references, now: now}
+// references, queues dispatched campaigns with dispatcher, and reads the time from now.
+func NewService(repo repository, references referenceChecker, dispatcher dispatcher, now func() time.Time) *Service {
+	return &Service{repo: repo, references: references, dispatcher: dispatcher, now: now}
+}
+
+// Dispatch approves a draft for sending: now, or at scheduledAt. The names in its segment are
+// checked again, since reference data may have changed after it was saved. The status change
+// and the queued job are saved together. A campaign dispatched before, including by a
+// concurrent request, gets ErrAlreadyDispatched.
+func (s *Service) Dispatch(ctx context.Context, id int64, scheduledAt *time.Time) (*Campaign, error) {
+	c, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	err = c.Dispatch(scheduledAt, s.time())
+	if errors.Is(err, ErrNotDraft) {
+		return nil, ErrAlreadyDispatched
+	}
+	if err = s.addUnknownReferences(ctx, c.draft.Segment, err); err != nil {
+		return nil, err
+	}
+	err = s.repo.Dispatch(ctx, c, func(tx *sql.Tx) error {
+		return s.dispatcher.EnqueueDispatch(ctx, tx, c)
+	})
+	if errors.Is(err, ErrNotDraft) {
+		return nil, ErrAlreadyDispatched
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // Create validates d, including the references in its segment, and saves it as a new draft.

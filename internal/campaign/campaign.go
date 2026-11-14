@@ -7,6 +7,7 @@ package campaign
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,38 +15,51 @@ import (
 	"github.com/bengisupinar/campaign/internal/customer"
 )
 
-const maxNameLength = 100
+const (
+	maxNameLength    = 100
+	maxScheduleAhead = 365 * 24 * time.Hour // how far ahead a campaign may be scheduled
+)
 
 var (
 	// ErrNotFound reports that no campaign has the given ID.
 	ErrNotFound = errors.New("campaign not found")
 	// ErrNotDraft reports an attempt to change or delete a campaign that is no longer a draft.
 	ErrNotDraft = errors.New("campaign is not a draft")
+	// ErrAlreadyDispatched reports a dispatch of a campaign that was dispatched before.
+	ErrAlreadyDispatched = errors.New("campaign already dispatched")
+	// ErrStatusChange reports a lifecycle move that CanBecome doesn't allow.
+	ErrStatusChange = errors.New("campaign status change not allowed")
 )
 
 // Status is where a campaign is in its lifecycle.
 type Status string
 
-// Statuses. Only the start of delivery is modelled: how a campaign finishes is decided when
-// delivery is built, which will add statuses and transitions.
+// Statuses.
 const (
 	StatusDraft     Status = "draft"     // being written; the only status that can change or be deleted
-	StatusScheduled Status = "scheduled" // approved, to be sent at a set time
-	StatusSending   Status = "sending"   // approved and handed to delivery
+	StatusScheduled Status = "scheduled" // dispatched, to be sent at its scheduled time
+	StatusSending   Status = "sending"   // its messages are being sent
+	StatusSent      Status = "sent"      // every message reached an outcome; receipts may still arrive
+	StatusFailed    Status = "failed"    // its dispatch couldn't start: the segment no longer validated
 )
 
 // CanBecome reports whether a campaign may move from s to next:
 //
-//	draft     → scheduled  approved with a send time
-//	draft     → sending    approved to send now
-//	scheduled → draft      unscheduled, to be edited again
+//	draft     → scheduled  dispatched with a send time
+//	draft     → sending    dispatched to send now
+//	scheduled → draft      unscheduled, to be edited again (no endpoint yet)
 //	scheduled → sending    its send time arrived
+//	scheduled → failed     its segment no longer validated when the time came
+//	sending   → sent       every message reached an outcome
+//	sending   → failed     its segment no longer validated as its dispatch started
 func (s Status) CanBecome(next Status) bool {
 	switch s {
 	case StatusDraft:
 		return next == StatusScheduled || next == StatusSending
 	case StatusScheduled:
-		return next == StatusDraft || next == StatusSending
+		return next == StatusDraft || next == StatusSending || next == StatusFailed
+	case StatusSending:
+		return next == StatusSent || next == StatusFailed
 	default:
 		return false
 	}
@@ -96,11 +110,14 @@ func clonePtr[T any](p *T) *T {
 // Campaign is the aggregate root: a draft and its place in the lifecycle. It copies what it is
 // given and what it returns, so it changes only through its methods.
 type Campaign struct {
-	id        int64
-	draft     Draft
-	status    Status
-	createdAt time.Time
-	updatedAt time.Time
+	id          int64
+	draft       Draft
+	status      Status
+	createdAt   time.Time
+	updatedAt   time.Time // when the draft last changed
+	scheduledAt time.Time // zero unless it was scheduled
+	startedAt   time.Time // zero until its dispatch starts
+	finishedAt  time.Time // zero until it is sent or fails
 }
 
 // New returns a draft campaign created at now. It fails with a *ValidationError listing every
@@ -127,6 +144,48 @@ func (c *Campaign) Update(d Draft, now time.Time) error {
 	return nil
 }
 
+// Dispatch approves the draft for sending: now, or at scheduledAt when it is set, which must be
+// in the future and at most a year ahead. It fails with ErrNotDraft unless the campaign is a
+// draft, and with a *ValidationError for a time it can't be scheduled at.
+func (c *Campaign) Dispatch(scheduledAt *time.Time, now time.Time) error {
+	if err := c.ensureDraft(); err != nil {
+		return err
+	}
+	if scheduledAt == nil {
+		c.status, c.startedAt = StatusSending, now
+		return nil
+	}
+	at := scheduledAt.UTC().Truncate(time.Microsecond) // PostgreSQL's precision
+	if !at.After(now) || at.Sub(now) > maxScheduleAhead {
+		return &ValidationError{Problems: []Problem{{Field: "scheduled_at", Code: ProblemInvalid}}}
+	}
+	c.status, c.scheduledAt = StatusScheduled, at
+	return nil
+}
+
+// Start begins sending a scheduled campaign whose time has come. A draft goes through Dispatch
+// instead.
+func (c *Campaign) Start(now time.Time) error {
+	if c.status != StatusScheduled {
+		return fmt.Errorf("%w: only a scheduled campaign starts, not a %s one", ErrStatusChange, c.status)
+	}
+	return c.moveTo(StatusSending, &c.startedAt, now)
+}
+
+// Finish marks a sending campaign sent: every one of its messages reached an outcome.
+func (c *Campaign) Finish(now time.Time) error { return c.moveTo(StatusSent, &c.finishedAt, now) }
+
+// Fail marks a scheduled or sending campaign failed: its dispatch couldn't go ahead.
+func (c *Campaign) Fail(now time.Time) error { return c.moveTo(StatusFailed, &c.finishedAt, now) }
+
+func (c *Campaign) moveTo(next Status, at *time.Time, now time.Time) error {
+	if !c.status.CanBecome(next) {
+		return fmt.Errorf("%w: %s to %s", ErrStatusChange, c.status, next)
+	}
+	c.status, *at = next, now
+	return nil
+}
+
 func (c *Campaign) ensureDraft() error {
 	if c.status != StatusDraft {
 		return ErrNotDraft
@@ -149,5 +208,15 @@ func (c *Campaign) Status() Status { return c.status }
 // CreatedAt returns when the campaign was created.
 func (c *Campaign) CreatedAt() time.Time { return c.createdAt }
 
-// UpdatedAt returns when the campaign last changed.
+// UpdatedAt returns when the campaign's draft last changed.
 func (c *Campaign) UpdatedAt() time.Time { return c.updatedAt }
+
+// ScheduledAt returns when a scheduled campaign is due, or zero.
+func (c *Campaign) ScheduledAt() time.Time { return c.scheduledAt }
+
+// StartedAt returns when the campaign's dispatch started, or zero. Its segment's windows end
+// then.
+func (c *Campaign) StartedAt() time.Time { return c.startedAt }
+
+// FinishedAt returns when the campaign was sent or failed, or zero.
+func (c *Campaign) FinishedAt() time.Time { return c.finishedAt }

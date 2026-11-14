@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,7 +53,10 @@ func TestCreateCampaign(t *testing.T) {
 		]},
 		"content": {"sms": {"body": "Merhaba {{first_name}}, sepetin seni bekliyor!"}},
 		"created_at": "2026-11-14T10:00:00Z",
-		"updated_at": "2026-11-14T10:00:00Z"
+		"updated_at": "2026-11-14T10:00:00Z",
+		"scheduled_at": null,
+		"started_at": null,
+		"finished_at": null
 	}`)
 }
 
@@ -132,6 +136,76 @@ func TestUnknownReferencesAreProblems(t *testing.T) {
 	}
 }
 
+func TestDispatchCampaign(t *testing.T) {
+	api := newTestAPI(t)
+	api.do(t, http.MethodPost, "/api/campaigns", validBody) // campaign 1
+	api.do(t, http.MethodPost, "/api/campaigns", validBody) // campaign 2
+
+	// Without a body, the campaign is sent now.
+	rec := api.do(t, http.MethodPost, "/api/campaigns/1/dispatch", "")
+	if rec.Code != http.StatusAccepted || rec.Header().Get("Location") != "/api/campaigns/1/delivery" {
+		t.Fatalf("dispatch now: status %d, Location %q; want 202 and the delivery progress", rec.Code, rec.Header().Get("Location"))
+	}
+	var sent campaignJSON
+	decode(t, rec, &sent)
+	if sent.Status != StatusSending || sent.StartedAt == nil || !sent.StartedAt.Equal(now) || sent.ScheduledAt != nil {
+		t.Errorf("dispatched now: %+v, want sending since %v", sent, now)
+	}
+
+	// With scheduled_at, it waits.
+	rec = api.do(t, http.MethodPost, "/api/campaigns/2/dispatch", `{"scheduled_at": "2026-11-15T09:00:00+03:00"}`)
+	var scheduled campaignJSON
+	decode(t, rec, &scheduled)
+	if rec.Code != http.StatusAccepted || scheduled.Status != StatusScheduled || scheduled.ScheduledAt == nil ||
+		!scheduled.ScheduledAt.Equal(time.Date(2026, 11, 15, 6, 0, 0, 0, time.UTC)) {
+		t.Errorf("dispatch scheduled: status %d, %+v", rec.Code, scheduled)
+	}
+	if !slices.Equal(api.dispatcher.queued, []int64{1, 2}) {
+		t.Errorf("queued dispatches %v, want [1 2]", api.dispatcher.queued)
+	}
+
+	tests := []struct {
+		name, path, body string
+		wantCode         int
+		wantJSON         string
+	}{
+		{"again", "/api/campaigns/1/dispatch", "", http.StatusConflict, `{"error": "already_dispatched"}`},
+		{"a scheduled campaign", "/api/campaigns/2/dispatch", "", http.StatusConflict, `{"error": "already_dispatched"}`},
+		{"unknown campaign", "/api/campaigns/99/dispatch", "", http.StatusNotFound, `{"error": "not_found"}`},
+		{"a time in the past", "/api/campaigns/3/dispatch", `{"scheduled_at": "2026-11-14T09:00:00Z"}`, http.StatusUnprocessableEntity,
+			`{"error": "invalid_campaign", "problems": [{"field": "scheduled_at", "problem": "invalid"}]}`},
+		{"malformed body", "/api/campaigns/3/dispatch", `{"scheduled_at": "tomorrow"}`, http.StatusBadRequest, `{"error": "malformed_json"}`},
+		{"unknown field", "/api/campaigns/3/dispatch", `{"at": "2026-11-15T09:00:00Z"}`, http.StatusBadRequest, `{"error": "malformed_json"}`},
+	}
+	api.do(t, http.MethodPost, "/api/campaigns", validBody) // campaign 3, a draft
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := api.do(t, http.MethodPost, tt.path, tt.body)
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d; body %s", rec.Code, tt.wantCode, rec.Body)
+			}
+			assertJSON(t, rec, tt.wantJSON)
+		})
+	}
+
+	// Names checked again: one removed since the draft was saved stops the dispatch.
+	api.references.problems = []Problem{{Field: "segment.conditions[0].in[0]", Code: ProblemUnknown, Detail: "İstanbul"}}
+	rec = api.do(t, http.MethodPost, "/api/campaigns/3/dispatch", "")
+	assertJSON(t, rec, `{"error": "invalid_campaign", "problems": [
+		{"field": "segment.conditions[0].in[0]", "problem": "unknown", "detail": "İstanbul"}
+	]}`)
+
+	// If the job can't be queued, nothing is dispatched.
+	api.references.problems = nil
+	api.dispatcher.err = errors.New("queue unavailable")
+	if rec := api.do(t, http.MethodPost, "/api/campaigns/3/dispatch", ""); rec.Code != http.StatusInternalServerError {
+		t.Errorf("queue failure: status %d, want 500", rec.Code)
+	}
+	if c := api.repo.campaigns[3]; c.Status() != StatusDraft {
+		t.Errorf("after the queue failure, campaign 3 is %s, want still a draft", c.Status())
+	}
+}
+
 func TestGetAndListCampaigns(t *testing.T) {
 	api := newTestAPI(t)
 	api.do(t, http.MethodPost, "/api/campaigns", validBody)
@@ -187,7 +261,10 @@ func TestUpdateCampaign(t *testing.T) {
 		"segment": {"version": 1, "match": "any", "conditions": [{"type": "language", "in": ["en"]}]},
 		"content": {"email": {"subject": "{{first_name}}, your basket misses you", "body": "It's still waiting."}},
 		"created_at": "2026-11-14T10:00:00Z",
-		"updated_at": "2026-11-14T11:00:00Z"
+		"updated_at": "2026-11-14T11:00:00Z",
+		"scheduled_at": null,
+		"started_at": null,
+		"finished_at": null
 	}`)
 }
 
@@ -259,6 +336,7 @@ func TestRejectedRequests(t *testing.T) {
 type testAPI struct {
 	repo       *fakeRepository
 	references *fakeReferences
+	dispatcher *fakeDispatcher
 	handler    http.Handler
 	clock      time.Time
 }
@@ -268,9 +346,10 @@ func newTestAPI(t *testing.T) *testAPI {
 	api := &testAPI{
 		repo:       &fakeRepository{campaigns: make(map[int64]*Campaign)},
 		references: &fakeReferences{},
+		dispatcher: &fakeDispatcher{},
 		clock:      now,
 	}
-	svc := NewService(api.repo, api.references, func() time.Time { return api.clock })
+	svc := NewService(api.repo, api.references, api.dispatcher, func() time.Time { return api.clock })
 	r := chi.NewRouter()
 	r.Mount("/api/campaigns", NewHandler(svc, slog.New(slog.DiscardHandler)))
 	api.handler = r
@@ -330,6 +409,18 @@ func (f *fakeRepository) Update(_ context.Context, c *Campaign) error {
 	return nil
 }
 
+// Dispatch saves the dispatch only if enqueue succeeds, as the store's transaction would.
+func (f *fakeRepository) Dispatch(_ context.Context, c *Campaign, enqueue func(tx *sql.Tx) error) error {
+	if err := f.draft(c.id); err != nil {
+		return err
+	}
+	if err := enqueue(nil); err != nil {
+		return err
+	}
+	f.campaigns[c.id] = snapshot(c)
+	return nil
+}
+
 func (f *fakeRepository) Delete(_ context.Context, id int64) error {
 	if err := f.draft(id); err != nil {
 		return err
@@ -373,6 +464,20 @@ type fakeReferences struct {
 
 func (f *fakeReferences) CheckReferences(context.Context, Segment) ([]Problem, error) {
 	return f.problems, f.err
+}
+
+// fakeDispatcher records the campaigns it is asked to queue, or fails with err.
+type fakeDispatcher struct {
+	queued []int64
+	err    error
+}
+
+func (f *fakeDispatcher) EnqueueDispatch(_ context.Context, _ *sql.Tx, c *Campaign) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.queued = append(f.queued, c.ID())
+	return nil
 }
 
 func snapshot(c *Campaign) *Campaign {

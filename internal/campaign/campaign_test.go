@@ -33,8 +33,11 @@ func TestStatusCanBecome(t *testing.T) {
 		{StatusDraft, StatusSending}:     true,
 		{StatusScheduled, StatusDraft}:   true,
 		{StatusScheduled, StatusSending}: true,
+		{StatusScheduled, StatusFailed}:  true,
+		{StatusSending, StatusSent}:      true,
+		{StatusSending, StatusFailed}:    true,
 	}
-	statuses := []Status{StatusDraft, StatusScheduled, StatusSending}
+	statuses := []Status{StatusDraft, StatusScheduled, StatusSending, StatusSent, StatusFailed}
 	for _, from := range statuses {
 		for _, to := range statuses {
 			if got, want := from.CanBecome(to), allowed[[2]Status{from, to}]; got != want {
@@ -117,6 +120,83 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
+func TestDispatch(t *testing.T) {
+	later := new(now.Add(time.Hour))
+	tests := []struct {
+		name          string
+		status        Status
+		scheduledAt   *time.Time
+		wantStatus    Status
+		wantErr       error
+		wantInvalid   bool
+		wantStarted   time.Time
+		wantScheduled time.Time
+	}{
+		{name: "now", status: StatusDraft, wantStatus: StatusSending, wantStarted: now},
+		{name: "scheduled", status: StatusDraft, scheduledAt: later, wantStatus: StatusScheduled, wantScheduled: *later},
+		{name: "a year ahead", status: StatusDraft, scheduledAt: new(now.Add(maxScheduleAhead)), wantStatus: StatusScheduled, wantScheduled: now.Add(maxScheduleAhead)},
+		{name: "in the past", status: StatusDraft, scheduledAt: new(now.Add(-time.Minute)), wantStatus: StatusDraft, wantInvalid: true},
+		{name: "this very moment", status: StatusDraft, scheduledAt: new(now), wantStatus: StatusDraft, wantInvalid: true},
+		{name: "beyond a year", status: StatusDraft, scheduledAt: new(now.Add(maxScheduleAhead + time.Second)), wantStatus: StatusDraft, wantInvalid: true},
+		{name: "already scheduled", status: StatusScheduled, wantStatus: StatusScheduled, wantErr: ErrNotDraft},
+		{name: "already sent", status: StatusSent, wantStatus: StatusSent, wantErr: ErrNotDraft},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := mustNewCampaign(t, validDraft())
+			c.status = tt.status
+
+			err := c.Dispatch(tt.scheduledAt, now)
+
+			if tt.wantInvalid {
+				if got := problemsOfErr(t, err); len(got) != 1 || got[0].Field != "scheduled_at" {
+					t.Errorf("Dispatch() problems = %+v, want scheduled_at", got)
+				}
+			} else if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Dispatch() error = %v, want %v", err, tt.wantErr)
+			}
+			if c.Status() != tt.wantStatus || !c.StartedAt().Equal(tt.wantStarted) || !c.ScheduledAt().Equal(tt.wantScheduled) {
+				t.Errorf("after Dispatch(): %s, started %v, scheduled %v; want %s, %v, %v",
+					c.Status(), c.StartedAt(), c.ScheduledAt(), tt.wantStatus, tt.wantStarted, tt.wantScheduled)
+			}
+		})
+	}
+}
+
+func TestLifecycleMoves(t *testing.T) {
+	later := now.Add(time.Hour)
+	tests := []struct {
+		name    string
+		from    Status
+		move    func(*Campaign, time.Time) error
+		want    Status
+		wantErr error
+	}{
+		{"a scheduled campaign starts", StatusScheduled, (*Campaign).Start, StatusSending, nil},
+		{"a sending campaign is sent", StatusSending, (*Campaign).Finish, StatusSent, nil},
+		{"a scheduled campaign fails", StatusScheduled, (*Campaign).Fail, StatusFailed, nil},
+		{"a sending campaign fails", StatusSending, (*Campaign).Fail, StatusFailed, nil},
+		{"a draft can't start", StatusDraft, (*Campaign).Start, StatusDraft, ErrStatusChange},
+		{"a scheduled campaign can't be sent", StatusScheduled, (*Campaign).Finish, StatusScheduled, ErrStatusChange},
+		{"a sent campaign can't fail", StatusSent, (*Campaign).Fail, StatusSent, ErrStatusChange},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := mustNewCampaign(t, validDraft())
+			c.status = tt.from
+			if err := tt.move(c, later); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tt.wantErr)
+			}
+			if c.Status() != tt.want {
+				t.Errorf("status = %s, want %s", c.Status(), tt.want)
+			}
+			if tt.wantErr == nil && !c.StartedAt().Equal(later) && !c.FinishedAt().Equal(later) {
+				t.Errorf("started %v, finished %v; want the move's time recorded", c.StartedAt(), c.FinishedAt())
+			}
+		})
+	}
+}
+
 func TestCampaignKeepsItsOwnCopy(t *testing.T) {
 	d := validDraft()
 	c, err := New(d, now)
@@ -140,6 +220,12 @@ func TestCampaignKeepsItsOwnCopy(t *testing.T) {
 func problemsOf(t *testing.T, d Draft) []Problem {
 	t.Helper()
 	_, err := New(d, now)
+	return problemsOfErr(t, err)
+}
+
+// problemsOfErr returns the problems in a *ValidationError, or nil for a nil error.
+func problemsOfErr(t *testing.T, err error) []Problem {
+	t.Helper()
 	var invalid *ValidationError
 	switch {
 	case err == nil:
@@ -147,7 +233,7 @@ func problemsOf(t *testing.T, d Draft) []Problem {
 	case errors.As(err, &invalid):
 		return invalid.Problems
 	default:
-		t.Fatalf("New() error = %v, want nil or a *ValidationError", err)
+		t.Fatalf("error = %v, want nil or a *ValidationError", err)
 		return nil
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bengisupinar/campaign/internal/campaign"
+	"github.com/bengisupinar/campaign/internal/delivery"
 	"github.com/bengisupinar/campaign/internal/platform/config"
 	"github.com/bengisupinar/campaign/internal/platform/database"
 	"github.com/bengisupinar/campaign/internal/platform/health"
@@ -63,8 +64,14 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	router.Get(health.LivenessPath, probes.Live)
 	router.Get(health.ReadinessPath, probes.Ready)
 
+	queue, err := delivery.NewQueue(sqlDB, logger)
+	if err != nil {
+		return err
+	}
 	segments := segmentation.NewService(db)
-	campaigns := campaign.NewService(campaign.NewStore(db), segments, time.Now)
+	campaigns := campaign.NewService(campaign.NewStore(db), segments, queue, time.Now)
+	// Event streams end with ctx: a server shutdown doesn't cancel the requests it waits for.
+	router.Mount("/api/campaigns/{id}/delivery", delivery.NewHandler(ctx, campaigns, db, logger))
 	router.Mount("/api/campaigns", campaign.NewHandler(campaigns, logger))
 
 	var lc net.ListenConfig
