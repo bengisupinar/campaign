@@ -5,11 +5,13 @@ language; an LLM proposes audience segmentation rules and SMS/email content; peo
 edit and approve it; approved campaigns are sent asynchronously to synthetic users through
 mock providers, and delivery status is tracked in real time.
 
-> **Status — Phase 3 (campaign drafts).** On top of the Phase 1 foundation (PostgreSQL,
+> **Status — Phase 4 (segmentation engine).** On top of the Phase 1 foundation (PostgreSQL,
 > migrations, health probes, structured logs, graceful shutdown, and a web app showing the
 > API's readiness), the customer and commerce model holds 5,000 synthetic customers and their
-> shopping activity. Marketers can manage campaign drafts through the REST API. Segmentation,
-> AI, sending and scheduling arrive in later phases.
+> shopping activity. Marketers can manage campaign drafts through the REST API. The
+> segmentation engine compiles a draft's segment into parameterised SQL and counts or lists
+> the customers it reaches on each channel. Saving a draft checks that the cities, categories
+> and countries it names exist. AI, sending and scheduling arrive in later phases.
 
 ## Quick start
 
@@ -62,13 +64,20 @@ make web-dev             # Vite on http://localhost:5173, proxying /api and /rea
 |---|---|
 | `make up` / `make down` / `make logs` | Full stack in Docker, waiting until it is healthy |
 | `make test` | Go tests with the race detector |
-| `make test-integration` | Also runs the database tests (schema, stores, seeding) against PostgreSQL, in throwaway databases (needs `make db` and a `.env`) |
+| `make test-integration` | Also runs the database tests (schema, stores, seeding, segmentation) against PostgreSQL, in throwaway databases (needs `make db` and a `.env`) |
 | `make seed` | Fill an empty database with the demo data |
 | `make lint` / `make fmt` | golangci-lint v2 (built into `./bin` on first use) / formatting |
 | `make migrate-new name=create_campaigns` | Create the next SQL migration |
 | `make migrate-status` / `migrate-up` / `migrate-down` | Inspect or move the schema version |
 | `make web-test` / `web-lint` / `web-build` | Frontend unit tests, lint + type-check, production build |
 | `make check` | Every Go and frontend check that needs no database |
+
+To time the segment queries on the seeded dataset, after `make db`:
+
+```sh
+TEST_DATABASE_URL='postgres://campaign:campaign@localhost:5432/campaign?sslmode=disable' \
+  go test -run '^$' -bench . ./internal/segmentation
+```
 
 ## Configuration
 
@@ -120,7 +129,11 @@ curl -X POST localhost:3000/api/campaigns -d '{
 - **Channels.** A campaign uses SMS, email (`"email": {"subject": …, "body": …}`) or both.
 - **Limits.** An SMS holds at most 160 characters and an email subject at most 80.
 - **Placeholders.** Text may contain `{{first_name}}`, `{{last_name}}` and `{{city}}`.
-- **Segments.** The DSL is described in [DECISIONS.md](DECISIONS.md) §20.
+- **Segments.** The DSL is described in [DECISIONS.md](DECISIONS.md) §20 and its meaning in
+  §22. Every city, category and country code a segment names must exist, spelled exactly as
+  stored (`İstanbul`, not `Istanbul`), or the draft gets an `unknown` problem. `total_spent`
+  bounds are in kuruş: `{"type": "total_spent", "within_days": 90, "min": 100000}` means at
+  least 1,000 TRY in the last 90 days.
 - **Errors.** An invalid draft gets 422 with every problem, e.g.
   `{"error": "invalid_campaign", "problems": [{"field": "content.sms.body", "problem": "too_long"}]}`.
   Other errors are `{"error": "<code>"}`: `not_found`, `not_draft`, `malformed_json`,
@@ -136,6 +149,8 @@ cmd/seed/                 one-shot seeder: migrations, then demo data into an em
 internal/campaign/        Campaign context: drafts, lifecycle, segment DSL, REST API
 internal/customer/        Customer context: customers, contact details, permissions, cities
 internal/commerce/        Commerce context: products, baskets, orders
+internal/segmentation/    segment engine: references, DSL → parameterised SQL, audience counts
+                          and recipient batches per channel
 internal/seed/            deterministic synthetic data: catalogue, people, personas
 internal/platform/        cross-cutting technical code (no business rules)
   config/                 environment configuration, logger
@@ -173,6 +188,11 @@ Deliberately left out so far; each phase review adds what it defers.
 - [ ] **More customer attributes,** such as birth date or gender, if segments need them. They
       are more personal data to protect.
 - [ ] **A precomputed segmentation profile** (materialized view), if segment queries become slow.
+- [ ] **Indexes for larger data** ([DECISIONS.md](DECISIONS.md) §23): a covering index on order
+      lines, and partial indexes for completed orders and granted permissions. Today's indexes
+      serve 5,000 customers.
+- [ ] **Suggestions for unknown names,** such as "İstanbul" for "Istanbul", in the `unknown`
+      problem, for marketers and the AI repair loop. Names must match exactly today.
 - [ ] **A separate migration job in production,** with a DDL role, so the API can run with a
       DML-only role ([DECISIONS.md](DECISIONS.md) §6).
 - [ ] **Segment-aware SMS limits.** Count GSM-7 and UCS-2 message segments instead of 160

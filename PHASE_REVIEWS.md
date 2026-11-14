@@ -6,6 +6,175 @@ snapshots taken when a phase is finished; later phases add entries rather than r
 ones. The reasoning behind each choice is in [DECISIONS.md](DECISIONS.md), setup and commands
 are in [README.md](README.md).
 
+## Phase 4: Segmentation engine (2026-11-14)
+
+**Scope.**
+
+- **Compiler.** Segment DSL version 1 compiles into parameterised PostgreSQL: every condition
+  type, nested all/any groups and negation.
+- **`segmentation.Service`.**
+  - `CountAudience`: customers matched, reachable, and reachable per channel.
+  - `Recipients`: keyset batches of up to 1,000.
+  - `CheckReferences`.
+- **Eligibility.** A contact point and a granted permission, checked per channel.
+- **References.** Countries, cities and categories must exist. They are checked by every engine
+  call and when drafts are saved.
+- **Query plans**, measured.
+
+Decisions taken while planning:
+
+- references are checked when drafts are created or updated (A);
+- email validity stays in the domain, with no new CHECK (B);
+- no index without a measurement (C);
+- `AsOf` bounds windows and is not a snapshot;
+- delivery re-checks permissions just before sending (Phase 5);
+- an empty segment matches every customer, subject to eligibility;
+- `total_spent` sums completed orders' lines.
+
+Not built yet: segment endpoints, sending, scheduling, queues, providers, AI and the frontend.
+
+**Result.**
+
+- `make check` and `make test-integration` pass.
+- **Seeded data.** The engine reaches the same 56 customers by SMS for the Phase 2A example as
+  the seed's hand-written query, which the seed tests tie to the generator's own analysis.
+- **Speed.** Every measured call takes under 60 ms on 5,000 customers, and no index was added.
+- **Through nginx,** a draft naming unknown cities or categories gets 422 listing each of them,
+  together with the draft's other problems.
+
+### How the pieces fit
+
+```text
+campaign.Service ── create/update a draft ──► referenceChecker ─┐
+AI tools, delivery (later) ─────────────────────────────────────┤
+                                                                ▼
+                          segmentation.Service: CountAudience · Recipients · CheckReferences
+                            prepare: Segment.Problems, channels and AsOf, then the names
+                                     Segment.References lists, looked up in one query
+                                                                │
+                                                                ▼
+                          compileSegment(segment, AsOf) ─► WHERE over customers c + bind arguments
+                          reachable                     ─► email_ok and sms_ok, the campaign's
+                                                           channels as parameters
+                                                                │
+                                   ┌────────────────────────────┴───────────────────────┐
+                                   ▼                                                    ▼
+                  CountAudience: one pass, count(*) FILTER      Recipients: id > after ORDER BY id LIMIT n
+```
+
+### Components
+
+| Component | Location | What it does | Tests |
+|---|---|---|---|
+| Compiler | `internal/segmentation/compile.go` | Segment and `AsOf` to SQL and arguments, one fixed shape per condition type | 15 compile cases; placeholders match arguments; unknown types fail |
+| References | `internal/segmentation/references.go` | Looks up every name `Segment.References` lists in one query, and reports the unknown ones | Integration: unknown, wrong case, injection-shaped name, malformed segment |
+| Service | `internal/segmentation/segmentation.go` | Query validation; `CountAudience` and `Recipients` over one eligibility fragment for both channels | 5 cases without a database; integration: 22 segments, 5 counts, batches, seeded cross-check |
+| Benchmark | `internal/segmentation/segmentation_test.go` | `BenchmarkAudience` on the seeded data | — |
+| Campaign changes | `internal/campaign` (`service.go`, `segment.go`, `problems.go`) | `referenceChecker`; unknown references join the 422; `Segment.Problems` and `Segment.References`; `total_spent` takes `min`/`max` in kuruş; code `unknown` | 6 API cases plus a 409; `References` paths; every segment case also checks `Problems` |
+| Wiring | `cmd/api/main.go` | Passes the segmentation service to the campaign service | Running stack |
+
+Coverage of `internal/segmentation` is 55.0 % without a database and 93.0 % with PostgreSQL;
+`internal/campaign` is at 78.9 % and 93.2 %. The audience queries are only covered with
+PostgreSQL.
+
+#### Compiler and service (`internal/segmentation`)
+
+- **Safety.** Each condition type has one fixed SQL fragment, and segment values only travel
+  as bind arguments. A test checks that every compiled segment has exactly as many
+  placeholders as arguments.
+- **Semantics** ([DECISIONS.md](DECISIONS.md) §22):
+  - same-row filters for basket lines and orders;
+  - completed orders only;
+  - spend bounds in kuruş, compared with the sum as stored;
+  - `COALESCE` for customers without orders;
+  - windows from `AsOf − N × 24h` to `AsOf`.
+- **One validation path.** Both operations go through `prepare`. It reports structural and
+  query problems together; references are only looked up when there are none.
+- **Recipients.**
+  - Contact details come only for the channels a customer can receive, as domain types that
+    mask themselves in logs. `Recipient` logs only its ID and channels.
+  - Phones and emails are parsed again on the way out; a value that fails parsing is an error.
+
+#### Campaign changes (`internal/campaign`)
+
+- **The DSL describes itself.** `Segment.Problems` lists a segment's structural problems and
+  `Segment.References` the names it uses with their field paths, so segmentation repeats no
+  DSL knowledge.
+- **Reference check.** `Service.Create` and `Update` add the unknown references to the
+  draft's other problems; the checker reports nothing for a segment with problems of its own.
+  Errors other than validation errors pass through, so a scheduled campaign still gets 409.
+- **One pair of bounds.** `total_spent` takes `min` and `max` in kuruş, like `order_count`.
+  `min_try` and `max_try` are gone, and both types share Phase 3's bounds rule: neither
+  negative, and `min` not above `max`.
+
+### Verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `make check` | Pass: Go tests with `-race`, lint with 0 issues, frontend tests (6) and build |
+| 2 | `make test-integration`, hand-made fixture | Pass. Six customers whose audiences are known, covering:<br>• every condition type, and windows ending at `AsOf` (a basket line dated after it);<br>• same-line and same-order filters;<br>• cancelled and refunded orders;<br>• bound edges, 999.90 against 1,000 TRY;<br>• nested and negated groups;<br>• eligibility: no phone with a granted SMS row, revoked, declined, no permissions;<br>• batches of two with contact details per channel;<br>• unknown references, including `Ankara'); DROP TABLE customers; --`, with the table intact afterwards, and none reported for a malformed segment |
+| 3 | `make test-integration`, seeded dataset | Pass. The example reaches 56 customers by SMS, as the hand-written query does. For every customer, the example and a nested segment, paging through `Recipients` finds exactly the customers and channels `CountAudience` counts |
+| 4 | Mutation check, repeated after the refactor | Eight deliberate bugs each fail their intended test: counting every order status, dropping `COALESCE`, dropping the phone check, open-ended windows, categories from another basket line, categories from another order, ignoring the campaign's channels, checking references in a malformed segment |
+| 5 | EXPLAIN ANALYZE and `BenchmarkAudience` | Existing indexes only. Count / first batch, medians of five runs: everyone 2.6 / 4.3 ms, the example 1.6 / 4.0 ms, nested 53 / 25 ms ([DECISIONS.md](DECISIONS.md) §23) |
+| 6 | Running stack, through nginx | Pass. Unknown city, category and country: 422 listing each one, also together with a too-long SMS. A padded city name: 422 `invalid` only. Known names: 201. `total_spent` with `min`/`max` in kuruş: 201; with `min_try`: 400 `malformed_json`; with `min` above `max`: 422. Test drafts were deleted afterwards, and customers still number 5,000 |
+
+### Deviations from the plan
+
+- **The count materialises the audience.** The plans showed PostgreSQL inlining the audience
+  and testing every permission twice. A `MATERIALIZED` CTE made counting every customer 7 times
+  faster (17 → 2.4 ms); it is the only query change that came from measuring.
+- **Unknown references join the draft's other problems.** The first version checked
+  references only once the rest of the draft was valid, so problems came in two rounds. A
+  self-review moved them into the same 422, as the plan said, following decision 21's "every
+  problem at once".
+- **Errors from the reference check are returned as they are.** The segmentation service
+  already says what failed; the first version wrapped the same context twice.
+- **`total_spent` bounds in kuruş, a review decision.**
+  - The plan kept `min_try`/`max_try` in whole lira, converted to kuruş by the compiler and
+    capped so the conversion couldn't overflow.
+  - After review, `total_spent` reuses `min`/`max` in kuruş, and the compiler compares them
+    as stored. The conversion and the caps are gone.
+  - DSL version 1 changed in place, since no stored or released campaign used the old fields.
+- **Readability refactor, a review request.** Behaviour is unchanged except where noted.
+  - **Eligibility.** A per-channel loop that built the count and recipient queries, whose
+    results were then mapped back by hand, became one fixed SQL fragment for both channels,
+    with the campaign's channels as parameters.
+  - **Compiler.** Every condition's SQL is in one switch. Optional parts compose by value
+    instead of through a pointer-mutating builder, and basket lines and order lines share
+    one category filter.
+  - **References.** The DSL walk moved to `campaign` (`Segment.References`), and the lookup
+    is one query instead of one per kind. The "nothing for a malformed segment" rule now
+    lives only in `CheckReferences`.
+  - **Campaign helpers.** Each condition type lists its parameters beside their checks,
+    replacing `allowedParams`. `Segment.Problems` replaces `Validate`, and one generic
+    `clonePtr` replaces the copying code.
+  - **Size.** The seven production files went from 1,230 to 1,122 lines.
+  - **Measured A/B.** Benchmarking showed no performance change: the variants were within
+    run-to-run noise.
+  - **SQL text changes.** A negated group now reads `NOT ((…))`, and categories are matched
+    through a products subquery instead of a join.
+- **Additions.**
+  - **Benchmark.** `BenchmarkAudience` repeats the measurement.
+  - **`ANALYZE`.** The seeded test database runs it, so plans don't change while a benchmark
+    runs.
+
+### Worth a closer look
+
+- **`AsOf` against live data.** Windows end at `AsOf`, but everything else is read live:
+  - rows dated after `AsOf` still count for conditions without a window;
+  - batches see changes made between them.
+- **Permissions.** Delivery must re-check each recipient just before sending.
+- **Amounts in kuruş.** `"min": 100000` means 1,000 TRY. The AI phase's tool schema must say
+  so, or a model writing lira would target spends 100 times smaller.
+- **City names match in every country.** Names are unique within a country, not across
+  countries, so pair `city` with `country` when a name is ambiguous.
+- **Exact names.** "Istanbul" is unknown, and so is the same name under another Unicode
+  normalisation. The `unknown` problems are meant to go back to the user or the model.
+- **Aggregation over long windows.** `order_count` and `total_spent` make the nested segment
+  the slowest at 53 ms, and they grow with the data ([DECISIONS.md](DECISIONS.md) §23).
+- **Database dependency.** Saving a draft queries the database for references; the API tests
+  use a fake checker.
+
 ## Phase 3: Campaign management (2026-11-14)
 
 **Scope.**

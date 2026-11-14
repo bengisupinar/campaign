@@ -3,8 +3,8 @@
 Each entry records the context, the decision and its consequences. Entries are appended as
 the project evolves; a superseded decision is marked as such rather than deleted.
 Phase 1 (project foundation, entries 1–12) and Phase 2A (customer and commerce, 13–17)
-decisions were recorded on 2026-11-13; Phase 2B (seeding, 18) and Phase 3 (campaigns, 19–21) on
-2026-11-14.
+decisions were recorded on 2026-11-13; Phase 2B (seeding, 18), Phase 3 (campaigns, 19–21) and
+Phase 4 (segmentation, 22–23) on 2026-11-14.
 
 ## 1. One repository: Go module at the root, Vue app in `frontend/`
 
@@ -315,7 +315,9 @@ that the segmentation engine must turn into safe SQL.
 - **Typed conditions.** Each condition has a `type` from a closed set: `country`, `city`,
   `language`, `signed_up`, `basket`, `purchased`, `order_count`, `total_spent` and `group`.
   Each type takes its own parameters (`in`, `within_days`, `categories`, `min`/`max`,
-  `min_try`/`max_try`, `match`/`conditions`), and every condition accepts `negate`.
+  `match`/`conditions`), and every condition accepts `negate`. *Amended by decision 22:*
+  `total_spent` took `min_try`/`max_try` in whole lira until Phase 4. It now takes
+  `min`/`max` in kuruş, like `order_count`'s bounds.
 - **Strict validation.** Unknown types and parameters are rejected.
 - **Limits.** Depth 3, 20 conditions, 50 values per list, windows of 1–3,650 days.
 - **One SQL pattern per condition.** Each condition maps to one parameterised SQL fragment from
@@ -360,12 +362,132 @@ since the basket add" can't be expressed in version 1.
 - **Rendered length.** It depends on the customer, so delivery checks it.
 - **Multilingual campaigns** will move content into a table keyed by channel and language.
 
+## 22. Segmentation engine: the DSL compiled to parameterised SQL
+
+**Context.** Segments are untrusted input, from marketers now and from an LLM later. Two
+callers must agree on who a segment reaches: audience estimates (the AI agent's tools, review)
+and dispatch (Phase 5).
+
+**Decision.** `internal/segmentation` evaluates `campaign.Segment`; `campaign` keeps owning the
+DSL and its structural validation.
+
+- **A pure compiler.** Each condition type maps to one fixed SQL fragment over `customers c`.
+  Values (names, codes, bounds, times) only travel as bind arguments, with lists expanded by
+  GORM, so nothing from a segment ever becomes SQL text. Every fragment is non-null (`EXISTS`,
+  `IN` over non-null columns, `COALESCE`d sums), so `NOT` behaves. An empty segment compiles to
+  `TRUE`: every customer, subject to eligibility.
+- **Same-row filters.** A basket condition's window and categories hold for the same basket
+  line, and a purchase condition's for the same order.
+- **Completed orders only.** Cancelled and refunded orders never count for `purchased`,
+  `order_count` or `total_spent`. `total_spent` sums quantity × unit price over completed
+  orders' lines.
+- **One pair of bounds, money in kuruş.**
+  - `order_count` and `total_spent` both take `min` and `max`, inclusive, neither negative,
+    and `min` not above `max`.
+  - For `total_spent` they are kuruş, the unit of `commerce.Money` and of the prices paid, so
+    the compiler compares them with the sum as stored, without conversion: `"min": 100000` is
+    1,000 TRY.
+  - The DSL's earlier `min_try`/`max_try` in whole lira are gone.
+- **`AsOf` bounds windows; it is not a snapshot.** The caller passes the reference time, and
+  "the last 30 days" means `AsOf − 30 × 24h` to `AsOf`. Everything else is read as it is when
+  the query runs, so the same query can find a different audience later, and rows dated after
+  `AsOf` still count for conditions without a window.
+- **Eligibility per channel.**
+  - Email needs an address and a granted email permission; SMS needs a phone and a granted
+    SMS permission.
+  - Channels are independent: a two-channel campaign reaches each customer on the channels
+    they allow and never requires both.
+  - Formats are the domain's job (decision 17), so only presence is tested. A granted SMS
+    permission without a phone, which the domain refuses but the table can hold, is not
+    trusted.
+  - One fixed SQL fragment selects both channels' eligibility; the campaign's channels are
+    bind parameters, so the query text never depends on them.
+- **One service, two questions.**
+  - `CountAudience` returns, in one statement, the customers matched, those reachable on at
+    least one channel and those reachable on each.
+  - `Recipients` returns up to 1,000 reachable customers after a customer ID, by keyset
+    pagination on the primary key. Each carries contact details only for the channels they
+    can receive.
+  - Both run the same validation, reference check and compiled WHERE clause, so estimates and
+    dispatch agree; a test pages through every batch of the seeded data and compares with the
+    counts.
+- **References.**
+  - Every country code, city and category a segment names must exist, matched exactly (case
+    included). Unknown ones are problems with code `unknown` at their field path.
+  - `campaign` owns the DSL, so it lists the names with their field paths
+    (`Segment.References`). The segmentation service looks them all up in one query.
+  - Campaign drafts are checked on create and update through a `referenceChecker` interface
+    that `campaign` declares and the segmentation service implements (wired in `cmd/api`), so
+    `campaign` doesn't import the engine.
+  - Unknown references are reported with the draft's other problems. A segment with problems
+    of its own gets no reference report, so a malformed name is never also called unknown.
+- **No REST API.** The AI agent's tools and delivery will call the service directly.
+
+**Consequences.**
+
+- **Permissions are read when the query runs.** Delivery must check each recipient's
+  permission again immediately before sending (Phase 5).
+- **Batches see changes made between them.** A customer who revokes mid-dispatch drops out of
+  later batches, and new customers above the cursor join them.
+- **Saving a draft queries the database:** one reference lookup, when the segment names
+  anything.
+- **Segment authors write amounts in kuruş, the AI agent included.** The AI phase must say so
+  in the tool's schema and examples: a model that writes lira targets spends 100 times
+  smaller.
+- **DSL version 1 changed in place.** No stored or released campaign used `min_try` or
+  `max_try`, and the API now rejects them as unknown fields.
+
+## 23. Segment query performance: measured, no new indexes
+
+**Context.** Phase 4 decided to measure query plans before adding indexes.
+
+**Decision.** No new indexes. EXPLAIN ANALYZE on the seeded dataset (5,000 customers, about
+18,800 orders) shows every per-customer probe using an existing index:
+
+- cities and countries: `customers (city_id)`;
+- basket lines: the `basket_items` primary key (customer first), or `basket_items (product_id)`
+  when the planner starts from a few categories;
+- orders: `orders (customer_id, ordered_at)`, with the window in the index condition; the
+  status filter removes almost nothing;
+- order lines: the `order_items` primary key;
+- permissions: the `notification_permissions` primary key per customer, or one hashed scan of
+  the table;
+- recipient batches: a range scan of the `customers` primary key that the `LIMIT` stops. Its
+  cost doesn't grow with the page: 3.4 ms for the first, 3.2 ms after customer 4,000.
+
+`BenchmarkAudience`, on an Apple M2 with PostgreSQL 18 in Docker and statistics gathered,
+measures whole service calls, validation and reference checks included (medians of five
+runs; repeated runs vary by about 10 %):
+
+| Segment | `CountAudience` | First batch of 1,000 recipients |
+|---|---|---|
+| Every customer | 2.6 ms | 4.3 ms |
+| The Phase 2A example | 1.6 ms | 4.0 ms |
+| Nested: two countries; a basket line in two categories in 14 days, or 3+ orders and 5,000+ TRY in a year; no purchase in 7 days | 53 ms | 25 ms |
+
+Measuring changed one query: the count materialises the audience in a CTE. Inlined,
+PostgreSQL tested every permission twice, and counting every customer took about 7 times
+longer (17 ms against 2.4 ms, side by side).
+
+Candidates for larger data, all deferred:
+
+- a covering index `order_items (order_id) INCLUDE (quantity, unit_price_minor)`, since the
+  nested segment's cost is per-customer order aggregation;
+- a partial index on completed orders;
+- a partial index on granted permissions;
+- a precomputed per-customer profile (README, further improvements).
+
+**Consequences.** Aggregation conditions over long windows (`order_count`, `total_spent`)
+cost time in proportion to the customers that reach them; at 100 times the data they would
+take seconds and justify the candidates. To repeat the measurement, run
+`go test -run '^$' -bench . ./internal/segmentation` with `TEST_DATABASE_URL` set.
+
 ## Open questions for later phases
 
 - **LLM without an API key:** select the mock provider when `ANTHROPIC_API_KEY` is empty, so the
   single command keeps working.
-- **Segmentation rules:** partly answered by decision 20, a whitelisted DSL validated on save.
-  Compiling it to parameterised queries is the segmentation phase.
+- **Segmentation rules:** answered by decisions 20 and 22: a whitelisted DSL validated on
+  save, compiled to parameterised queries.
 - **Real-time status:** SSE versus WebSockets; fan-out across instances (LISTEN/NOTIFY) if the API scales out.
 - **Seed data:** answered by decision 18, a one-shot, idempotent Compose service that runs
   before the API.
