@@ -1,5 +1,7 @@
 // Package database connects to PostgreSQL through GORM and applies the versioned schema
-// migrations. The schema changes only through migrations, never through GORM's AutoMigrate.
+// migrations. The schema changes only through migrations, never through GORM's AutoMigrate:
+// the application's tables through goose, and the job queue's tables through River's own
+// versioned migrator.
 package database
 
 import (
@@ -8,10 +10,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/lock"
+	"github.com/riverqueue/river/riverdriver/riverdatabasesql"
+	"github.com/riverqueue/river/rivermigrate"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -108,5 +113,57 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS, logger *slog.Logger) e
 		slog.Int64("version", version),
 		slog.Int("applied", len(results)),
 	)
+
+	// River migrates its own tables, so upgrading River never means copying its SQL here.
+	migrator, err := queueMigrator(db, logger)
+	if err != nil {
+		return err
+	}
+	queueResult, err := migrator.Migrate(ctx, rivermigrate.DirectionUp, nil)
+	if err != nil {
+		return fmt.Errorf("migrate job queue: %w", err)
+	}
+	for _, v := range queueResult.Versions {
+		logger.InfoContext(ctx, "job queue migration applied",
+			slog.Int("version", v.Version),
+			slog.String("name", v.Name),
+			slog.String("duration", v.Duration.String()),
+		)
+	}
 	return nil
+}
+
+// SQLTx returns the database/sql transaction behind a GORM transaction, so that libraries
+// such as River can take part in it. tx must come from (*gorm.DB).Transaction.
+func SQLTx(tx *gorm.DB) (*sql.Tx, error) {
+	sqlTx, ok := tx.Statement.ConnPool.(*sql.Tx)
+	if !ok {
+		return nil, fmt.Errorf("not in a database/sql transaction: %T", tx.Statement.ConnPool)
+	}
+	return sqlTx, nil
+}
+
+// CheckQueueSchema fails unless every one of River's migrations has been applied. Processes
+// that don't migrate, such as the worker, call it before they start.
+func CheckQueueSchema(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
+	migrator, err := queueMigrator(db, logger)
+	if err != nil {
+		return err
+	}
+	result, err := migrator.Validate(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("check job queue schema: %w", err)
+	}
+	if !result.OK {
+		return fmt.Errorf("job queue schema is out of date: %s", strings.Join(result.Messages, "; "))
+	}
+	return nil
+}
+
+func queueMigrator(db *sql.DB, logger *slog.Logger) (*rivermigrate.Migrator[*sql.Tx], error) {
+	migrator, err := rivermigrate.New(riverdatabasesql.New(db), &rivermigrate.Config{Logger: logger})
+	if err != nil {
+		return nil, fmt.Errorf("job queue migrator: %w", err)
+	}
+	return migrator, nil
 }
