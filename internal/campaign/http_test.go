@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -76,6 +77,58 @@ func TestCreateReportsEveryProblem(t *testing.T) {
 	]}`)
 	if len(api.repo.campaigns) != 0 {
 		t.Errorf("an invalid campaign was stored")
+	}
+}
+
+func TestUnknownReferencesAreProblems(t *testing.T) {
+	longSMS := strings.Replace(validBody, "Merhaba {{first_name}}, sepetin seni bekliyor!", strings.Repeat("a", 161), 1)
+	tests := []struct {
+		name       string
+		body       string
+		checkErr   error
+		wantStatus int
+		want       string
+	}{
+		{"unknown city", validBody, nil, http.StatusUnprocessableEntity, `{"error": "invalid_campaign", "problems": [
+			{"field": "segment.conditions[0].in[0]", "problem": "unknown", "detail": "Istanbul"}
+		]}`},
+		{"reported with the draft's other problems", longSMS, nil, http.StatusUnprocessableEntity, `{"error": "invalid_campaign", "problems": [
+			{"field": "content.sms.body", "problem": "too_long"},
+			{"field": "segment.conditions[0].in[0]", "problem": "unknown", "detail": "Istanbul"}
+		]}`},
+		{"the check fails", validBody, errors.New("connection refused"), http.StatusInternalServerError, `{"error": "internal"}`},
+	}
+	for _, tt := range tests {
+		for _, req := range []struct{ method, path string }{
+			{http.MethodPost, "/api/campaigns"},
+			{http.MethodPut, "/api/campaigns/1"},
+		} {
+			t.Run(tt.name+"/"+req.method, func(t *testing.T) {
+				api := newTestAPI(t)
+				api.do(t, http.MethodPost, "/api/campaigns", validBody) // campaign 1, saved while references were fine
+				api.references.problems = []Problem{{Field: "segment.conditions[0].in[0]", Code: ProblemUnknown, Detail: "Istanbul"}}
+				api.references.err = tt.checkErr
+
+				rec := api.do(t, req.method, req.path, tt.body)
+
+				if rec.Code != tt.wantStatus {
+					t.Fatalf("status = %d, want %d; body %s", rec.Code, tt.wantStatus, rec.Body)
+				}
+				assertJSON(t, rec, tt.want)
+				if len(api.repo.campaigns) != 1 || api.repo.campaigns[1].UpdatedAt() != now {
+					t.Errorf("the draft was saved")
+				}
+			})
+		}
+	}
+
+	// A campaign past the draft stage can't change, whatever its segment names.
+	api := newTestAPI(t)
+	api.do(t, http.MethodPost, "/api/campaigns", validBody)
+	api.repo.campaigns[1].status = StatusScheduled
+	api.references.problems = []Problem{{Field: "segment.conditions[0].in[0]", Code: ProblemUnknown, Detail: "Istanbul"}}
+	if rec := api.do(t, http.MethodPut, "/api/campaigns/1", validBody); rec.Code != http.StatusConflict {
+		t.Errorf("PUT on a scheduled campaign: status = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
@@ -201,18 +254,23 @@ func TestRejectedRequests(t *testing.T) {
 	}
 }
 
-// testAPI serves the campaign API over a real Service, an in-memory repository and a clock
-// the test sets.
+// testAPI serves the campaign API over a real Service, an in-memory repository, a reference
+// checker and a clock the test sets.
 type testAPI struct {
-	repo    *fakeRepository
-	handler http.Handler
-	clock   time.Time
+	repo       *fakeRepository
+	references *fakeReferences
+	handler    http.Handler
+	clock      time.Time
 }
 
 func newTestAPI(t *testing.T) *testAPI {
 	t.Helper()
-	api := &testAPI{repo: &fakeRepository{campaigns: make(map[int64]*Campaign)}, clock: now}
-	svc := NewService(api.repo, func() time.Time { return api.clock })
+	api := &testAPI{
+		repo:       &fakeRepository{campaigns: make(map[int64]*Campaign)},
+		references: &fakeReferences{},
+		clock:      now,
+	}
+	svc := NewService(api.repo, api.references, func() time.Time { return api.clock })
 	r := chi.NewRouter()
 	r.Mount("/api/campaigns", NewHandler(svc, slog.New(slog.DiscardHandler)))
 	api.handler = r
@@ -305,6 +363,16 @@ func (f *fakeRepository) draft(id int64) error {
 		return ErrNotDraft
 	}
 	return nil
+}
+
+// fakeReferences answers reference checks with the problems, or the error, a test sets.
+type fakeReferences struct {
+	problems []Problem
+	err      error
+}
+
+func (f *fakeReferences) CheckReferences(context.Context, Segment) ([]Problem, error) {
+	return f.problems, f.err
 }
 
 func snapshot(c *Campaign) *Campaign {

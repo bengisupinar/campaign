@@ -17,6 +17,7 @@ import (
 	"github.com/bengisupinar/campaign/internal/platform/database"
 	"github.com/bengisupinar/campaign/internal/platform/health"
 	"github.com/bengisupinar/campaign/internal/platform/httpserver"
+	"github.com/bengisupinar/campaign/internal/segmentation"
 	"github.com/bengisupinar/campaign/migrations"
 )
 
@@ -62,7 +63,8 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	router.Get(health.LivenessPath, probes.Live)
 	router.Get(health.ReadinessPath, probes.Ready)
 
-	campaigns := campaign.NewService(campaign.NewStore(db), time.Now)
+	segments := segmentation.NewService(db)
+	campaigns := campaign.NewService(campaign.NewStore(db), segments, time.Now)
 	router.Mount("/api/campaigns", campaign.NewHandler(campaigns, logger))
 
 	var lc net.ListenConfig
