@@ -59,26 +59,8 @@ func (c Content) validate(ps *problems) {
 }
 
 func (c Content) clone() Content {
-	if c.SMS != nil {
-		sms := *c.SMS
-		c.SMS = &sms
-	}
-	if c.Email != nil {
-		email := *c.Email
-		c.Email = &email
-	}
+	c.SMS, c.Email = clonePtr(c.SMS), clonePtr(c.Email)
 	return c
-}
-
-// isPlaceholder reports whether name is a customer field a message may include. Delivery
-// fills placeholders in for each recipient.
-func isPlaceholder(name string) bool {
-	switch name {
-	case "first_name", "last_name", "city":
-		return true
-	default:
-		return false
-	}
 }
 
 // checkText requires text, applies a length limit when there is one, and checks the
@@ -95,9 +77,9 @@ func checkText(ps *problems, field, text string, limit int) {
 	checkPlaceholders(ps, field, text)
 }
 
-// checkPlaceholders reports each {{placeholder}} in text that isn't a known customer field,
-// and, once, braces that don't form a placeholder: "{{" without "}}", "}}" on its own, or
-// "{{}}". It scans the whole text, so every unknown placeholder is reported.
+// checkPlaceholders reports each {{placeholder}} in text that isn't a customer field delivery
+// can fill in, and, once, braces that don't form a placeholder: "{{" without "}}", "}}" on its
+// own, or "{{}}". It scans the whole text, so every unknown placeholder is reported.
 func checkPlaceholders(ps *problems, field, text string) {
 	malformed := false
 	for rest := text; ; {
@@ -115,10 +97,11 @@ func checkPlaceholders(ps *problems, field, text string) {
 			malformed = true
 			break
 		}
-		switch name := strings.TrimSpace(rest[open+2 : open+2+end]); {
-		case name == "":
+		switch name := strings.TrimSpace(rest[open+2 : open+2+end]); name {
+		case "":
 			malformed = true
-		case !isPlaceholder(name):
+		case "first_name", "last_name", "city":
+		default:
 			ps.addDetail(field, ProblemUnknownPlaceholder, name)
 		}
 		rest = rest[open+2+end+2:]

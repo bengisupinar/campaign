@@ -85,6 +85,14 @@ func (d Draft) clone() Draft {
 	return d
 }
 
+// clonePtr returns a pointer to a copy of *p, or nil.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	return new(*p)
+}
+
 // Campaign is the aggregate root: a draft and its place in the lifecycle. It copies what it is
 // given and what it returns, so it changes only through its methods.
 type Campaign struct {

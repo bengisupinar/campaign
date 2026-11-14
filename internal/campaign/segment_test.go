@@ -43,7 +43,7 @@ func TestSegmentValidation(t *testing.T) {
 			Condition{Type: ConditionPurchased, Negate: true},
 			Condition{Type: ConditionOrderCount, WithinDays: new(365), Min: new(10)},
 			Condition{Type: ConditionOrderCount, Max: new(0)},
-			Condition{Type: ConditionTotalSpent, WithinDays: new(90), MinTRY: new(1000), MaxTRY: new(5000)},
+			Condition{Type: ConditionTotalSpent, WithinDays: new(90), Min: new(100_000), Max: new(500_000)},
 		)},
 		{name: "groups three deep", segment: segment(group(city, group(city)))},
 		{name: "missing", segment: Segment{},
@@ -112,12 +112,12 @@ func TestSegmentValidation(t *testing.T) {
 				{Field: "segment.conditions[0].min", Code: ProblemInvalid},
 				{Field: "segment.conditions[0].max", Code: ProblemInvalid},
 			}},
-		{name: "negative minimum under a valid maximum", segment: segment(Condition{Type: ConditionTotalSpent, MinTRY: new(-5), MaxTRY: new(10)}),
-			want: []Problem{{Field: "segment.conditions[0].min_try", Code: ProblemInvalid}}},
+		{name: "negative minimum under a valid maximum", segment: segment(Condition{Type: ConditionTotalSpent, Min: new(-5), Max: new(10)}),
+			want: []Problem{{Field: "segment.conditions[0].min", Code: ProblemInvalid}}},
 		{name: "valid minimum above a negative maximum", segment: segment(Condition{Type: ConditionOrderCount, Min: new(3), Max: new(-1)}),
 			want: []Problem{{Field: "segment.conditions[0].max", Code: ProblemInvalid}}},
 		{name: "total_spent without bounds", segment: segment(Condition{Type: ConditionTotalSpent, WithinDays: new(30)}),
-			want: []Problem{{Field: "segment.conditions[0]", Code: ProblemRequired, Detail: "min_try or max_try"}}},
+			want: []Problem{{Field: "segment.conditions[0]", Code: ProblemRequired, Detail: "min or max"}}},
 		{name: "parameters the type doesn't take", segment: segment(
 			Condition{Type: ConditionBasket, In: []string{"İstanbul"}},
 			Condition{Type: ConditionCity, In: []string{"İstanbul"}, WithinDays: new(3)},
@@ -141,6 +141,35 @@ func TestSegmentValidation(t *testing.T) {
 			if got := problemsOf(t, d); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("problems = %+v, want %+v", got, tt.want)
 			}
+			// The segmentation engine asks the segment directly and must get the same answer.
+			if got := tt.segment.Problems(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Problems() = %+v, want %+v", got, tt.want)
+			}
 		})
+	}
+}
+
+func TestSegmentReferences(t *testing.T) {
+	s := Segment{Version: SegmentVersion, Match: MatchAll, Conditions: []Condition{
+		{Type: ConditionCountry, In: []string{"TR", "DE"}},
+		{Type: ConditionLanguage, In: []string{"tr"}},
+		{Type: ConditionGroup, Match: MatchAny, Conditions: []Condition{
+			{Type: ConditionCity, In: []string{"İstanbul"}},
+			{Type: ConditionBasket, WithinDays: new(30)},
+			{Type: ConditionPurchased, Categories: []string{"Books", "Electronics"}, Negate: true},
+		}},
+	}}
+	want := []Reference{
+		{Kind: ReferenceCountry, Name: "TR", Field: "segment.conditions[0].in[0]"},
+		{Kind: ReferenceCountry, Name: "DE", Field: "segment.conditions[0].in[1]"},
+		{Kind: ReferenceCity, Name: "İstanbul", Field: "segment.conditions[2].conditions[0].in[0]"},
+		{Kind: ReferenceCategory, Name: "Books", Field: "segment.conditions[2].conditions[2].categories[0]"},
+		{Kind: ReferenceCategory, Name: "Electronics", Field: "segment.conditions[2].conditions[2].categories[1]"},
+	}
+	if got := s.References(); !reflect.DeepEqual(got, want) {
+		t.Errorf("References() = %+v, want %+v", got, want)
+	}
+	if got := (Segment{Version: SegmentVersion, Match: MatchAll}).References(); got != nil {
+		t.Errorf("References() of an empty segment = %+v, want none", got)
 	}
 }

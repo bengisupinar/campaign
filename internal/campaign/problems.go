@@ -15,6 +15,7 @@ const (
 	ProblemTooDeep              = "too_deep"
 	ProblemInvalid              = "invalid"
 	ProblemNotAllowed           = "not_allowed" // a parameter the condition type doesn't take
+	ProblemUnknown              = "unknown"     // a country, city or category that doesn't exist
 	ProblemUnknownPlaceholder   = "unknown_placeholder"
 	ProblemMalformedPlaceholder = "malformed_placeholder"
 )

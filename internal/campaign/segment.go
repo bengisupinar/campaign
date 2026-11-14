@@ -52,7 +52,7 @@ const (
 	ConditionBasket     ConditionType = "basket"      // within_days?, categories?
 	ConditionPurchased  ConditionType = "purchased"   // within_days?, categories? (completed orders)
 	ConditionOrderCount ConditionType = "order_count" // within_days?, min?, max? (completed orders)
-	ConditionTotalSpent ConditionType = "total_spent" // within_days?, min_try?, max_try? (completed orders)
+	ConditionTotalSpent ConditionType = "total_spent" // within_days?, min?, max? in kuruş (completed orders)
 	ConditionGroup      ConditionType = "group"       // match, conditions
 )
 
@@ -65,12 +65,66 @@ type Condition struct {
 	In         []string      `json:"in,omitempty"`
 	WithinDays *int          `json:"within_days,omitempty"`
 	Categories []string      `json:"categories,omitempty"`
-	Min        *int          `json:"min,omitempty"`
+	Min        *int          `json:"min,omitempty"` // orders for order_count; kuruş for total_spent (100 = 1 TRY)
 	Max        *int          `json:"max,omitempty"`
-	MinTRY     *int          `json:"min_try,omitempty"` // whole Turkish lira
-	MaxTRY     *int          `json:"max_try,omitempty"`
 	Match      Match         `json:"match,omitempty"`
 	Conditions []Condition   `json:"conditions,omitempty"`
+}
+
+// Reference is a name a segment uses that must exist in the reference data, and the field it
+// appears in.
+type Reference struct {
+	Kind  ReferenceKind
+	Name  string
+	Field string // e.g. "segment.conditions[0].in[1]"
+}
+
+// ReferenceKind is the reference data a name must exist in.
+type ReferenceKind string
+
+// Reference kinds.
+const (
+	ReferenceCountry  ReferenceKind = "country"  // a country condition's codes
+	ReferenceCity     ReferenceKind = "city"     // a city condition's names, in any country
+	ReferenceCategory ReferenceKind = "category" // a basket or purchased condition's categories
+)
+
+// Problems lists what is wrong with the segment's structure: version, match, condition types,
+// parameters and limits, with field paths starting with "segment". Whether the names it uses
+// exist is for the segmentation engine to check (see References).
+func (s Segment) Problems() []Problem {
+	var ps problems
+	s.validate(&ps)
+	return ps
+}
+
+// References lists the country codes, city names and category names the segment uses, in the
+// order they appear.
+func (s Segment) References() []Reference {
+	return appendReferences(nil, "segment.conditions", s.Conditions)
+}
+
+func appendReferences(refs []Reference, path string, conditions []Condition) []Reference {
+	for i, c := range conditions {
+		at := fmt.Sprintf("%s[%d]", path, i)
+		var kind ReferenceKind
+		var param string
+		var names []string
+		switch c.Type {
+		case ConditionCountry:
+			kind, param, names = ReferenceCountry, "in", c.In
+		case ConditionCity:
+			kind, param, names = ReferenceCity, "in", c.In
+		case ConditionBasket, ConditionPurchased:
+			kind, param, names = ReferenceCategory, "categories", c.Categories
+		case ConditionGroup:
+			refs = appendReferences(refs, at+".conditions", c.Conditions)
+		}
+		for j, name := range names {
+			refs = append(refs, Reference{Kind: kind, Name: name, Field: fmt.Sprintf("%s.%s[%d]", at, param, j)})
+		}
+	}
+	return refs
 }
 
 func (s Segment) validate(ps *problems) {
@@ -81,15 +135,15 @@ func (s Segment) validate(ps *problems) {
 	if s.Version != SegmentVersion {
 		ps.add("segment.version", ProblemInvalid)
 	}
-	checkMatch(ps, "segment.match", s.Match)
 	v := segmentValidator{ps: ps}
+	v.match("segment.match", s.Match)
 	v.conditions("segment.conditions", s.Conditions, 1)
 	if v.count > maxSegmentConditions {
 		ps.add("segment.conditions", ProblemTooMany)
 	}
 }
 
-// segmentValidator walks a segment's conditions, counting them.
+// segmentValidator walks a segment's conditions, recording their problems and counting them.
 type segmentValidator struct {
 	ps    *problems
 	count int
@@ -102,26 +156,33 @@ func (v *segmentValidator) conditions(path string, cs []Condition, depth int) {
 	}
 }
 
+// condition checks the parameters of c's type, which each case lists in takes; any other
+// parameter is not allowed. Type and negate are always allowed.
 func (v *segmentValidator) condition(path string, c Condition, depth int) {
+	var takes []string
 	switch c.Type {
 	case ConditionCountry:
+		takes = []string{"in"}
 		v.list(path+".in", c.In, true, validCountryCode)
 	case ConditionCity:
+		takes = []string{"in"}
 		v.list(path+".in", c.In, true, validName)
 	case ConditionLanguage:
+		takes = []string{"in"}
 		v.list(path+".in", c.In, true, func(s string) bool { return customer.Language(s).Valid() })
 	case ConditionSignedUp:
+		takes = []string{"within_days"}
 		v.window(path, c.WithinDays, true)
 	case ConditionBasket, ConditionPurchased:
+		takes = []string{"within_days", "categories"}
 		v.window(path, c.WithinDays, false)
 		v.list(path+".categories", c.Categories, false, validName)
-	case ConditionOrderCount:
+	case ConditionOrderCount, ConditionTotalSpent:
+		takes = []string{"within_days", "min", "max"}
 		v.window(path, c.WithinDays, false)
-		v.bounds(path, "min", "max", c.Min, c.Max)
-	case ConditionTotalSpent:
-		v.window(path, c.WithinDays, false)
-		v.bounds(path, "min_try", "max_try", c.MinTRY, c.MaxTRY)
+		v.bounds(path, c.Min, c.Max)
 	case ConditionGroup:
+		takes = []string{"match", "conditions"}
 		v.group(path, c, depth)
 	case "":
 		v.ps.add(path+".type", ProblemRequired)
@@ -130,9 +191,8 @@ func (v *segmentValidator) condition(path string, c Condition, depth int) {
 		v.ps.addDetail(path+".type", ProblemInvalid, string(c.Type))
 		return
 	}
-	allowed := allowedParams(c.Type)
 	for _, name := range c.paramsSet() {
-		if !slices.Contains(allowed, name) {
+		if !slices.Contains(takes, name) {
 			v.ps.add(path+"."+name, ProblemNotAllowed)
 		}
 	}
@@ -172,22 +232,23 @@ func (v *segmentValidator) window(path string, days *int, required bool) {
 	}
 }
 
-// bounds checks a range: at least one end, neither negative, and lo not above hi. It reports
-// every problem; the order of the ends is only checked when both are valid on their own.
-func (v *segmentValidator) bounds(path, loName, hiName string, lo, hi *int) {
+// bounds checks a "min"/"max" range: at least one end, neither negative, and min not above
+// max. It reports every problem; the order of the ends is only checked when both are valid on
+// their own.
+func (v *segmentValidator) bounds(path string, lo, hi *int) {
 	if lo == nil && hi == nil {
-		v.ps.addDetail(path, ProblemRequired, loName+" or "+hiName)
+		v.ps.addDetail(path, ProblemRequired, "min or max")
 		return
 	}
 	loValid, hiValid := lo == nil || *lo >= 0, hi == nil || *hi >= 0
 	if !loValid {
-		v.ps.add(path+"."+loName, ProblemInvalid)
+		v.ps.add(path+".min", ProblemInvalid)
 	}
 	if !hiValid {
-		v.ps.add(path+"."+hiName, ProblemInvalid)
+		v.ps.add(path+".max", ProblemInvalid)
 	}
 	if lo != nil && hi != nil && loValid && hiValid && *lo > *hi {
-		v.ps.add(path+"."+hiName, ProblemInvalid)
+		v.ps.add(path+".max", ProblemInvalid)
 	}
 }
 
@@ -196,7 +257,7 @@ func (v *segmentValidator) group(path string, c Condition, depth int) {
 		v.ps.add(path, ProblemTooDeep) // its conditions would be deeper than allowed
 		return
 	}
-	checkMatch(v.ps, path+".match", c.Match)
+	v.match(path+".match", c.Match)
 	if len(c.Conditions) == 0 {
 		v.ps.add(path+".conditions", ProblemRequired)
 		return
@@ -204,13 +265,13 @@ func (v *segmentValidator) group(path string, c Condition, depth int) {
 	v.conditions(path+".conditions", c.Conditions, depth+1)
 }
 
-func checkMatch(ps *problems, path string, m Match) {
+func (v *segmentValidator) match(path string, m Match) {
 	switch m {
 	case MatchAll, MatchAny:
 	case "":
-		ps.add(path, ProblemRequired)
+		v.ps.add(path, ProblemRequired)
 	default:
-		ps.addDetail(path, ProblemInvalid, string(m))
+		v.ps.addDetail(path, ProblemInvalid, string(m))
 	}
 }
 
@@ -219,31 +280,10 @@ func validCountryCode(s string) bool {
 }
 
 // validName accepts a city or category name: not empty or whitespace only, no surrounding
-// whitespace, at most 100 characters. Whether it exists is checked when the segment is
-// compiled.
+// whitespace, at most 100 characters. Whether it exists is checked by the segmentation engine.
 func validName(s string) bool {
 	trimmed := strings.TrimSpace(s)
 	return trimmed != "" && trimmed == s && utf8.RuneCountInString(s) <= maxValueLength
-}
-
-// allowedParams lists the parameters a condition type takes, besides type and negate.
-func allowedParams(t ConditionType) []string {
-	switch t {
-	case ConditionCountry, ConditionCity, ConditionLanguage:
-		return []string{"in"}
-	case ConditionSignedUp:
-		return []string{"within_days"}
-	case ConditionBasket, ConditionPurchased:
-		return []string{"within_days", "categories"}
-	case ConditionOrderCount:
-		return []string{"within_days", "min", "max"}
-	case ConditionTotalSpent:
-		return []string{"within_days", "min_try", "max_try"}
-	case ConditionGroup:
-		return []string{"match", "conditions"}
-	default:
-		return nil
-	}
 }
 
 // paramsSet lists the parameters c sets, by their JSON names.
@@ -258,8 +298,6 @@ func (c Condition) paramsSet() []string {
 		{"categories", c.Categories != nil},
 		{"min", c.Min != nil},
 		{"max", c.Max != nil},
-		{"min_try", c.MinTRY != nil},
-		{"max_try", c.MaxTRY != nil},
 		{"match", c.Match != ""},
 		{"conditions", c.Conditions != nil},
 	} {
@@ -286,20 +324,10 @@ func cloneConditions(cs []Condition) []Condition {
 	}
 	out := make([]Condition, len(cs))
 	for i, c := range cs {
-		c.In = slices.Clone(c.In)
-		c.Categories = slices.Clone(c.Categories)
-		c.WithinDays, c.Min, c.Max = cloneInt(c.WithinDays), cloneInt(c.Min), cloneInt(c.Max)
-		c.MinTRY, c.MaxTRY = cloneInt(c.MinTRY), cloneInt(c.MaxTRY)
+		c.In, c.Categories = slices.Clone(c.In), slices.Clone(c.Categories)
+		c.WithinDays, c.Min, c.Max = clonePtr(c.WithinDays), clonePtr(c.Min), clonePtr(c.Max)
 		c.Conditions = cloneConditions(c.Conditions)
 		out[i] = c
 	}
 	return out
-}
-
-func cloneInt(p *int) *int {
-	if p == nil {
-		return nil
-	}
-	v := *p
-	return &v
 }

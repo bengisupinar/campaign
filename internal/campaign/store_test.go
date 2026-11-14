@@ -23,7 +23,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	nested.Segment.Conditions = append(nested.Segment.Conditions, Condition{
 		Type: ConditionGroup, Match: MatchAny, Conditions: []Condition{
 			{Type: ConditionOrderCount, WithinDays: new(365), Min: new(3)},
-			{Type: ConditionTotalSpent, MinTRY: new(1000), MaxTRY: new(5000), Negate: true},
+			{Type: ConditionTotalSpent, Min: new(100_000), Max: new(500_000), Negate: true},
 		},
 	})
 	everyone := validDraft()
