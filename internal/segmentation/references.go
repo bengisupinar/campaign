@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/bengisupinar/campaign/internal/campaign"
+	"github.com/bengisupinar/campaign/internal/customer"
 )
 
 // existingNames lists, with their kind, which of the given country codes, city names and
@@ -53,4 +54,41 @@ func (s *Service) CheckReferences(ctx context.Context, seg campaign.Segment) ([]
 		}
 	}
 	return problems, nil
+}
+
+// Options are what a segment's conditions can name: the countries, cities and categories in
+// the reference data, and the languages customers speak. The composer offers them as choices.
+type Options struct {
+	Countries  []CountryOption     `json:"countries"`  // by code
+	Cities     []CityOption        `json:"cities"`     // by country, then name
+	Categories []string            `json:"categories"` // by name
+	Languages  []customer.Language `json:"languages"`
+}
+
+// CountryOption is a country, which a segment names by its code.
+type CountryOption struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+// CityOption is a city a segment can name, and the country it is in.
+type CityOption struct {
+	Name    string `json:"name"`
+	Country string `json:"country"`
+}
+
+// Options returns what a segment's conditions can name, in three short queries.
+func (s *Service) Options(ctx context.Context) (Options, error) {
+	opts := Options{Countries: []CountryOption{}, Cities: []CityOption{}, Categories: []string{}, Languages: customer.Languages()}
+	db := s.db.WithContext(ctx)
+	if err := db.Raw("SELECT code, name FROM countries ORDER BY code").Scan(&opts.Countries).Error; err != nil {
+		return Options{}, fmt.Errorf("list countries: %w", err)
+	}
+	if err := db.Raw("SELECT name, country_code AS country FROM cities ORDER BY country_code, name").Scan(&opts.Cities).Error; err != nil {
+		return Options{}, fmt.Errorf("list cities: %w", err)
+	}
+	if err := db.Raw("SELECT name FROM categories ORDER BY name").Scan(&opts.Categories).Error; err != nil {
+		return Options{}, fmt.Errorf("list categories: %w", err)
+	}
+	return opts, nil
 }

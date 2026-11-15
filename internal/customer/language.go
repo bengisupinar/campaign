@@ -1,5 +1,7 @@
 package customer
 
+import "slices"
+
 // Language is a customer's preferred language for messages, as an ISO 639-1 code.
 //
 // The set is closed: supporting another language needs content generation for it, and the
@@ -13,12 +15,10 @@ const (
 	LanguageEnglish Language = "en"
 )
 
-// Valid reports whether l is a supported language.
-func (l Language) Valid() bool {
-	switch l {
-	case LanguageTurkish, LanguageGerman, LanguageEnglish:
-		return true
-	default:
-		return false
-	}
+// Languages returns the supported languages.
+func Languages() []Language {
+	return []Language{LanguageTurkish, LanguageGerman, LanguageEnglish}
 }
+
+// Valid reports whether l is a supported language.
+func (l Language) Valid() bool { return slices.Contains(Languages(), l) }

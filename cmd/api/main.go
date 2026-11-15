@@ -73,6 +73,7 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	// Event streams end with ctx: a server shutdown doesn't cancel the requests it waits for.
 	router.Mount("/api/campaigns/{id}/delivery", delivery.NewHandler(ctx, campaigns, db, logger))
 	router.Mount("/api/campaigns", campaign.NewHandler(campaigns, logger))
+	router.Mount("/api/segments", segmentation.NewHandler(segments, time.Now, logger))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.HTTPAddr)

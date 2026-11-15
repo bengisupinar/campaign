@@ -3,7 +3,8 @@
 // customer and commerce tables, and counts or lists the customers each channel can reach.
 //
 // Audience estimates and dispatch use the same compiled query, so they apply the same rules.
-// The AI agent's tools and the delivery phase call the service directly; there is no REST API.
+// Delivery and the AI agent's tools call the service directly; the composer uses a read-only
+// API (see NewHandler) that returns counts, never customers.
 package segmentation
 
 import (
@@ -48,11 +49,11 @@ type Query struct {
 	AsOf time.Time
 }
 
-// Audience counts the customers a query reaches.
+// Audience counts the customers a query reaches. Its JSON form is the API's audience estimate.
 type Audience struct {
-	Matched   int                      // customers the segment matches
-	Reachable int                      // of those, customers who can receive at least one channel
-	ByChannel map[customer.Channel]int // of those, customers who can receive each channel
+	Matched   int                      `json:"matched"`    // customers the segment matches
+	Reachable int                      `json:"reachable"`  // of those, customers who can receive at least one channel
+	ByChannel map[customer.Channel]int `json:"by_channel"` // of those, customers who can receive each channel
 }
 
 // Recipient is a customer who can receive a campaign on at least one of its channels, with the
