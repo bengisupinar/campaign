@@ -1,14 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-type Readiness = 'checking' | 'ready' | 'not-ready' | 'unreachable'
+import { t } from '@/i18n'
 
-const labels: Record<Readiness, string> = {
-  checking: 'API: checking…',
-  ready: 'API: ready',
-  'not-ready': 'API: not ready',
-  unreachable: 'API: unreachable',
-}
+type Readiness = 'checking' | 'ready' | 'notReady' | 'unreachable'
 
 const readiness = ref<Readiness>('checking')
 
@@ -18,7 +13,7 @@ async function checkReadiness(): Promise<Readiness> {
   try {
     const res = await fetch('/readyz', { headers: { Accept: 'application/json' } })
     if (res.ok) return 'ready'
-    return res.status === 503 ? 'not-ready' : 'unreachable'
+    return res.status === 503 ? 'notReady' : 'unreachable'
   } catch {
     return 'unreachable'
   }
@@ -30,7 +25,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <p class="api-status" :data-state="readiness" role="status">{{ labels[readiness] }}</p>
+  <p class="api-status" :data-state="readiness" role="status">{{ t(`api.${readiness}`) }}</p>
 </template>
 
 <style scoped>
@@ -39,10 +34,12 @@ onMounted(async () => {
   align-items: center;
   gap: 0.5rem;
   margin: 0;
-  padding: 0.375rem 0.75rem;
+  padding: 0.25rem 0.625rem;
   border-radius: 999px;
-  background: #f1f3f5;
-  font-size: 0.875rem;
+  background: var(--neutral-soft, #f1f3f5);
+  color: var(--text-muted, #475467);
+  font-size: 0.8125rem;
+  white-space: nowrap;
 }
 
 .api-status::before {
@@ -57,7 +54,7 @@ onMounted(async () => {
   --dot: #2f9e44;
 }
 
-.api-status[data-state='not-ready'] {
+.api-status[data-state='notReady'] {
   --dot: #f08c00;
 }
 
