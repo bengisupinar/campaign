@@ -146,7 +146,7 @@ func TestDispatchCampaign(t *testing.T) {
 	if rec.Code != http.StatusAccepted || rec.Header().Get("Location") != "/api/campaigns/1/delivery" {
 		t.Fatalf("dispatch now: status %d, Location %q; want 202 and the delivery progress", rec.Code, rec.Header().Get("Location"))
 	}
-	var sent campaignJSON
+	var sent View
 	decode(t, rec, &sent)
 	if sent.Status != StatusSending || sent.StartedAt == nil || !sent.StartedAt.Equal(now) || sent.ScheduledAt != nil {
 		t.Errorf("dispatched now: %+v, want sending since %v", sent, now)
@@ -154,7 +154,7 @@ func TestDispatchCampaign(t *testing.T) {
 
 	// With scheduled_at, it waits.
 	rec = api.do(t, http.MethodPost, "/api/campaigns/2/dispatch", `{"scheduled_at": "2026-11-15T09:00:00+03:00"}`)
-	var scheduled campaignJSON
+	var scheduled View
 	decode(t, rec, &scheduled)
 	if rec.Code != http.StatusAccepted || scheduled.Status != StatusScheduled || scheduled.ScheduledAt == nil ||
 		!scheduled.ScheduledAt.Equal(time.Date(2026, 11, 15, 6, 0, 0, 0, time.UTC)) {
@@ -216,7 +216,7 @@ func TestGetAndListCampaigns(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	var one campaignJSON
+	var one View
 	decode(t, rec, &one)
 	if one.ID != 1 || one.Name != "Abandoned baskets in İstanbul" {
 		t.Errorf("GET /api/campaigns/1 = campaign %d %q, want campaign 1", one.ID, one.Name)
@@ -227,7 +227,7 @@ func TestGetAndListCampaigns(t *testing.T) {
 		t.Fatalf("list status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	var list struct {
-		Campaigns []campaignJSON `json:"campaigns"`
+		Campaigns []View `json:"campaigns"`
 	}
 	decode(t, rec, &list)
 	var ids []int64
@@ -331,9 +331,49 @@ func TestRejectedRequests(t *testing.T) {
 	}
 }
 
+// DispatchApproved sends only the draft as it was approved: an edit since then wins.
+func TestDispatchApproved(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := t.Context()
+	c, err := api.svc.Create(ctx, validDraft())
+	if err != nil {
+		t.Fatalf("Create(): %v", err)
+	}
+	approved := c.UpdatedAt()
+
+	api.clock = now.Add(time.Minute)
+	edited := validDraft()
+	edited.Name = "Edited after approval"
+	if _, err := api.svc.Update(ctx, c.ID(), edited); err != nil {
+		t.Fatalf("Update(): %v", err)
+	}
+	if _, err := api.svc.DispatchApproved(ctx, c.ID(), approved, nil); !errors.Is(err, ErrChanged) {
+		t.Fatalf("DispatchApproved(the version before the edit) error = %v, want ErrChanged", err)
+	}
+	if len(api.dispatcher.queued) != 0 {
+		t.Fatalf("queued %v after a refused dispatch, want nothing", api.dispatcher.queued)
+	}
+
+	current, err := api.svc.Get(ctx, c.ID())
+	if err != nil {
+		t.Fatalf("Get(): %v", err)
+	}
+	sent, err := api.svc.DispatchApproved(ctx, c.ID(), current.UpdatedAt(), nil)
+	if err != nil || sent.Status() != StatusSending {
+		t.Fatalf("DispatchApproved(the current version) = %v, %v; want sending", sent, err)
+	}
+	if _, err := api.svc.DispatchApproved(ctx, c.ID(), current.UpdatedAt(), nil); !errors.Is(err, ErrAlreadyDispatched) {
+		t.Errorf("approving again: error = %v, want ErrAlreadyDispatched", err)
+	}
+	if len(api.dispatcher.queued) != 1 {
+		t.Errorf("queued %v, want one dispatch", api.dispatcher.queued)
+	}
+}
+
 // testAPI serves the campaign API over a real Service, an in-memory repository, a reference
 // checker and a clock the test sets.
 type testAPI struct {
+	svc        *Service
 	repo       *fakeRepository
 	references *fakeReferences
 	dispatcher *fakeDispatcher
@@ -350,6 +390,7 @@ func newTestAPI(t *testing.T) *testAPI {
 		clock:      now,
 	}
 	svc := NewService(api.repo, api.references, api.dispatcher, func() time.Time { return api.clock })
+	api.svc = svc
 	r := chi.NewRouter()
 	r.Mount("/api/campaigns", NewHandler(svc, slog.New(slog.DiscardHandler)))
 	api.handler = r

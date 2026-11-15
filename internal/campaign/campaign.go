@@ -29,6 +29,8 @@ var (
 	ErrAlreadyDispatched = errors.New("campaign already dispatched")
 	// ErrStatusChange reports a lifecycle move that CanBecome doesn't allow.
 	ErrStatusChange = errors.New("campaign status change not allowed")
+	// ErrChanged reports a dispatch of a draft that changed after it was checked or approved.
+	ErrChanged = errors.New("campaign changed since it was checked")
 )
 
 // Status is where a campaign is in its lifecycle.

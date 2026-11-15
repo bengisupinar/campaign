@@ -41,8 +41,9 @@ type handler struct {
 	logger *slog.Logger
 }
 
-// campaignJSON is a campaign in API responses: the draft's fields plus the read-only ones.
-type campaignJSON struct {
+// View is a campaign as the API shows it: the draft's fields plus the read-only ones. The
+// assistant shows campaigns the same way.
+type View struct {
 	ID       int64              `json:"id"`
 	Status   Status             `json:"status"`
 	Channels []customer.Channel `json:"channels"`
@@ -77,7 +78,7 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", fmt.Sprintf("/api/campaigns/%d", c.ID()))
-	httpserver.WriteJSON(w, http.StatusCreated, toJSON(c))
+	httpserver.WriteJSON(w, http.StatusCreated, NewView(c))
 }
 
 func (h *handler) list(w http.ResponseWriter, r *http.Request) {
@@ -87,10 +88,10 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := struct {
-		Campaigns []campaignJSON `json:"campaigns"`
-	}{Campaigns: make([]campaignJSON, len(campaigns))}
+		Campaigns []View `json:"campaigns"`
+	}{Campaigns: make([]View, len(campaigns))}
 	for i, c := range campaigns {
-		body.Campaigns[i] = toJSON(c)
+		body.Campaigns[i] = NewView(c)
 	}
 	httpserver.WriteJSON(w, http.StatusOK, body)
 }
@@ -105,7 +106,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, err)
 		return
 	}
-	httpserver.WriteJSON(w, http.StatusOK, toJSON(c))
+	httpserver.WriteJSON(w, http.StatusOK, NewView(c))
 }
 
 func (h *handler) update(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +123,7 @@ func (h *handler) update(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, err)
 		return
 	}
-	httpserver.WriteJSON(w, http.StatusOK, toJSON(c))
+	httpserver.WriteJSON(w, http.StatusOK, NewView(c))
 }
 
 func (h *handler) delete(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +156,7 @@ func (h *handler) dispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", fmt.Sprintf("/api/campaigns/%d/delivery", c.ID()))
-	httpserver.WriteJSON(w, http.StatusAccepted, toJSON(c))
+	httpserver.WriteJSON(w, http.StatusAccepted, NewView(c))
 }
 
 // id parses the {id} path parameter. Anything but a positive integer names no campaign.
@@ -196,6 +197,8 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusConflict, "not_draft")
 	case errors.Is(err, ErrAlreadyDispatched):
 		writeError(w, http.StatusConflict, "already_dispatched")
+	case errors.Is(err, ErrChanged):
+		writeError(w, http.StatusConflict, "campaign_changed")
 	default:
 		h.logger.ErrorContext(r.Context(), "campaign request failed",
 			slog.String("request_id", middleware.GetReqID(r.Context())),
@@ -209,8 +212,9 @@ func writeError(w http.ResponseWriter, status int, code string) {
 	httpserver.WriteJSON(w, status, errorJSON{Error: code})
 }
 
-func toJSON(c *Campaign) campaignJSON {
-	return campaignJSON{
+// NewView returns the API's view of c.
+func NewView(c *Campaign) View {
+	return View{
 		ID:          c.ID(),
 		Status:      c.Status(),
 		Channels:    c.Channels(),

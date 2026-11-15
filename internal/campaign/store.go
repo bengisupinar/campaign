@@ -130,8 +130,9 @@ func (s *Store) List(ctx context.Context) ([]*Campaign, error) {
 // one succeeds; the others get ErrNotDraft.
 func (s *Store) Dispatch(ctx context.Context, c *Campaign, enqueue func(tx *sql.Tx) error) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// updated_at pins the draft that was checked: an edit since then makes this a no-op.
 		result := tx.Model(&campaignRow{}).
-			Where("id = ? AND status = ?", c.id, StatusDraft).
+			Where("id = ? AND status = ? AND updated_at = ?", c.id, StatusDraft, c.updatedAt).
 			Updates(statusColumns(c))
 		if result.Error != nil {
 			return fmt.Errorf("dispatch campaign %d: %w", c.id, result.Error)
@@ -201,14 +202,18 @@ func timeOf(p *time.Time) time.Time {
 	return p.UTC()
 }
 
-// missingOrNotDraft explains why a write that only applies to drafts matched no row.
+// missingOrNotDraft explains why a write that only applies to drafts matched no row: the
+// campaign is gone, no longer a draft, or (for a dispatch) a draft changed since it was read.
 func (s *Store) missingOrNotDraft(ctx context.Context, id int64) error {
 	var status string
 	if err := s.db.WithContext(ctx).Raw("SELECT status FROM campaigns WHERE id = ?", id).Scan(&status).Error; err != nil {
 		return fmt.Errorf("campaign %d: %w", id, err)
 	}
-	if status == "" {
+	switch Status(status) {
+	case "":
 		return ErrNotFound
+	case StatusDraft:
+		return ErrChanged
 	}
 	return ErrNotDraft
 }

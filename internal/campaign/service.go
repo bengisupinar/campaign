@@ -56,12 +56,27 @@ func NewService(repo repository, references referenceChecker, dispatcher dispatc
 
 // Dispatch approves a draft for sending: now, or at scheduledAt. The names in its segment are
 // checked again, since reference data may have changed after it was saved. The status change
-// and the queued job are saved together. A campaign dispatched before, including by a
-// concurrent request, gets ErrAlreadyDispatched.
+// and the queued job are saved together, and only if the draft is still the one checked: an
+// edit in between gets ErrChanged. A campaign dispatched before, including by a concurrent
+// request, gets ErrAlreadyDispatched.
 func (s *Service) Dispatch(ctx context.Context, id int64, scheduledAt *time.Time) (*Campaign, error) {
+	return s.dispatch(ctx, id, nil, scheduledAt)
+}
+
+// DispatchApproved dispatches a draft like Dispatch, but only the version a person approved:
+// the draft as it was when it was last updated at approved. A draft changed since gets
+// ErrChanged, checked in the transaction that dispatches it.
+func (s *Service) DispatchApproved(ctx context.Context, id int64, approved time.Time, scheduledAt *time.Time) (*Campaign, error) {
+	return s.dispatch(ctx, id, &approved, scheduledAt)
+}
+
+func (s *Service) dispatch(ctx context.Context, id int64, approved *time.Time, scheduledAt *time.Time) (*Campaign, error) {
 	c, err := s.repo.Get(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if approved != nil && c.status == StatusDraft && !c.updatedAt.Equal(*approved) {
+		return nil, ErrChanged
 	}
 	err = c.Dispatch(scheduledAt, s.time())
 	if errors.Is(err, ErrNotDraft) {

@@ -133,6 +133,29 @@ func TestStoreDispatchAndTransitions(t *testing.T) {
 	store := NewStore(db)
 	ctx := t.Context()
 	c := mustCreate(t, store, validDraft())
+
+	// A copy read before an edit can't be dispatched: the condition on updated_at makes the
+	// edit win, atomically, and nothing is queued.
+	edited, err := store.Get(ctx, c.ID())
+	if err != nil {
+		t.Fatalf("Get(): %v", err)
+	}
+	d := validDraft()
+	d.Name = "Edited"
+	if err := edited.Update(d, now.Add(time.Second)); err != nil {
+		t.Fatalf("Update(): %v", err)
+	}
+	if err := store.Update(ctx, edited); err != nil {
+		t.Fatalf("store.Update(): %v", err)
+	}
+	if err := c.Dispatch(nil, now); err != nil {
+		t.Fatalf("Dispatch(): %v", err)
+	}
+	queued := false
+	if err := store.Dispatch(ctx, c, func(*sql.Tx) error { queued = true; return nil }); !errors.Is(err, ErrChanged) || queued {
+		t.Fatalf("dispatching a stale copy: error = %v, queued %v; want ErrChanged and nothing queued", err, queued)
+	}
+	c = edited
 	if err := c.Dispatch(nil, now); err != nil {
 		t.Fatalf("Dispatch(): %v", err)
 	}
