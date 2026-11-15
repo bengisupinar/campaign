@@ -272,9 +272,12 @@ frontend/                 Vue 3 + TypeScript + Vite app, its Dockerfile and ngin
   src/views/              campaign list, composer and campaign pages
   src/components/         wizard, segment builder, message editor, estimate, delivery monitor
 compose.yaml              postgres, seed (one-shot), api, worker (exactly one), web
+docs/ARCHITECTURE.md      the architecture diagram (Mermaid)
+ai-sessions/              the Claude Code session that built the project, redacted
 ```
 
 Each business capability is a single package, `internal/<capability>`. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a diagram of the components,
 [DECISIONS.md](DECISIONS.md) for the reasoning behind the stack and structure,
 [PHASE_REVIEWS.md](PHASE_REVIEWS.md) for what each phase built and how it was verified, and
 [CLAUDE.md](CLAUDE.md) for the engineering principles and workflow.
