@@ -21,6 +21,7 @@ function changeLocale(event: Event) {
       <RouterLink to="/campaigns" class="brand">{{ t('app.name') }}</RouterLink>
       <nav :aria-label="t('nav.label')" class="nav">
         <RouterLink to="/campaigns">{{ t('nav.campaigns') }}</RouterLink>
+        <RouterLink to="/assistant">{{ t('nav.assistant') }}</RouterLink>
       </nav>
       <div class="header__end">
         <ApiStatus />
@@ -34,7 +35,12 @@ function changeLocale(event: Event) {
   </header>
 
   <main class="main">
-    <RouterView />
+    <!-- The assistant stays alive while other pages are open, with its conversation. -->
+    <RouterView v-slot="{ Component }">
+      <KeepAlive include="AssistantView">
+        <component :is="Component" />
+      </KeepAlive>
+    </RouterView>
   </main>
 
   <div class="notices" aria-live="polite">
@@ -90,6 +96,11 @@ function changeLocale(event: Event) {
 .brand:hover,
 .nav a:hover {
   text-decoration: none;
+}
+
+.nav {
+  display: flex;
+  gap: 16px;
 }
 
 .nav a {

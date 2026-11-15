@@ -5,6 +5,7 @@ const tr = {
   'app.name': 'Campaign Composer',
   'nav.label': 'Ana menü',
   'nav.campaigns': 'Kampanyalar',
+  'nav.assistant': 'Asistan',
   'language.label': 'Dil',
 
   'api.checking': 'API: kontrol ediliyor…',
@@ -233,6 +234,53 @@ const tr = {
   'error.body_too_large': 'Kampanya çok büyük.',
   'error.method_not_allowed': 'Bu işlem desteklenmiyor.',
   'error.unknown': 'Bir sorun oluştu. Tekrar deneyin.',
+  'error.assistant_busy': 'Asistan şu anda meşgul. Biraz sonra tekrar deneyin.',
+  'error.assistant_unavailable': 'Asistan şu anda kullanılamıyor. Daha sonra tekrar deneyin.',
+  'error.assistant_timeout': 'Asistanın yanıtı çok uzun sürdü. Tekrar deneyin.',
+  'error.conversation_not_found':
+    'Bu sohbetin süresi doldu. Yeni bir sohbet başlatmak için mesajınızı tekrar gönderin.',
+  'error.conversation_busy': 'Asistan hâlâ önceki mesajınızı yanıtlıyor.',
+  'error.conversation_full': 'Bu sohbet çok uzadı. Yeni bir sohbet başlatın.',
+  'error.invalid_message': 'En fazla 2.000 karakterlik bir mesaj yazın.',
+  'error.approval_not_found': 'Bu isteğin süresi doldu. Asistana tekrar sorun.',
+  'error.approval_closed': 'Bu istek için zaten karar verildi.',
+  'error.campaign_changed': 'Kampanya bu istekten sonra değişti. Gözden geçirip tekrar isteyin.',
+
+  'assistant.title': 'Kampanya asistanı',
+  'assistant.subtitle':
+    'Bir kampanyayı istediğiniz dilde anlatın. Asistan taslağını hazırlar, kitlesini tahmin eder ve bir şey göndermeden önce size sorar.',
+  'assistant.examples': 'Örnekler:',
+  'assistant.example1':
+    'Son bir haftada sepetine ürün ekleyip satın almayan İstanbul’daki müşterilere bir SMS kampanyası hazırla.',
+  'assistant.example2': 'Almanya’daki kaç müşteri son bir yılda 1.000 TL’den fazla harcadı?',
+  'assistant.example3': 'Son taslağımı yarın saat 10:00 için planla.',
+  'assistant.label': 'Asistana mesaj',
+  'assistant.placeholder': 'Asistana yazın… (Enter gönderir, Shift+Enter yeni satır açar)',
+  'assistant.send': 'Gönder',
+  'assistant.thinking': 'Düşünüyor…',
+  'assistant.new': 'Yeni sohbet',
+  'assistant.you': 'Siz',
+  'assistant.name': 'Asistan',
+  'assistant.refused': 'Asistan bu istekte yardımcı olamıyor.',
+  'assistant.stepLimit':
+    'Asistan çok fazla adımdan sonra durdu. Tamamladıkları yukarıda; devam etmek için yeni bir mesaj gönderin.',
+  'assistant.interrupted':
+    'Asistan yanıt veremeden kesildi. Tamamladıkları yukarıda; devam etmek için yeni bir mesaj gönderin.',
+  'assistant.created': 'Taslak oluşturuldu',
+  'assistant.updated': 'Taslak güncellendi',
+  'assistant.openEditor': 'Düzenleyicide aç',
+  'assistant.estimate': 'Kitle tahmini',
+  'assistant.sendTitle': 'Bu kampanya gönderilsin mi?',
+  'assistant.scheduleTitle': 'Bu kampanya planlansın mı?',
+  'assistant.when': 'Ne zaman',
+  'assistant.now': 'Onaydan hemen sonra',
+  'assistant.reach': 'Tahmini erişim',
+  'assistant.approve': 'Onayla',
+  'assistant.approvalNote': 'Burada onaylamadıkça hiçbir şey gönderilmez.',
+  'assistant.dispatched': 'Onaylandı: kampanya gönderiliyor.',
+  'assistant.scheduled': 'Onaylandı: {time} için planlandı.',
+  'assistant.cancelled': 'İptal edildi: hiçbir şey gönderilmedi.',
+  'assistant.follow': 'Teslimatı takip et',
 } satisfies Record<keyof typeof en, string>
 
 export default tr

@@ -172,6 +172,42 @@ export const segmentOptions = () => request<SegmentOptions>('GET', '/api/segment
 export const estimateAudience = (segment: Segment, signal?: AbortSignal) =>
   request<Audience>('POST', '/api/segments/audience', { segment }, signal)
 
+// AssistantAction is something the assistant did, shown as a card: built by the API from the
+// tools that ran, never from the assistant's words.
+export interface AssistantAction {
+  type: 'campaign_created' | 'campaign_updated' | 'audience_estimated' | 'dispatch_requested'
+  campaign?: Campaign
+  audience?: Audience
+  approval?: { id: string; scheduled_at: string | null; reach: number }
+}
+
+export interface AssistantTurn {
+  conversation_id: string
+  reply: string
+  notice?: 'refused' | 'step_limit' | 'interrupted'
+  actions: AssistantAction[]
+}
+
+// Decision is the result of approving or cancelling a dispatch the assistant asked for.
+export interface Decision {
+  status: 'dispatched' | 'cancelled'
+  campaign?: Campaign
+}
+
+// sendAssistantMessage sends a message to the assistant, starting a conversation when
+// conversationID is undefined. The browser's time zone lets it schedule "tomorrow at 9".
+export const sendAssistantMessage = (conversationID: string | undefined, message: string) =>
+  request<AssistantTurn>('POST', '/api/assistant/messages', {
+    conversation_id: conversationID ?? '',
+    message,
+    time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  })
+
+// decideApproval approves or cancels a dispatch the assistant asked for: the only way it
+// happens.
+export const decideApproval = (id: string, decision: 'approve' | 'cancel') =>
+  request<Decision>('POST', `/api/assistant/approvals/${encodeURIComponent(id)}`, { decision })
+
 // deliveryEventsURL is the server-sent event stream of a campaign's delivery progress.
 export const deliveryEventsURL = (id: number) => `/api/campaigns/${id}/delivery/events`
 

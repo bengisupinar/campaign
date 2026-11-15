@@ -4,6 +4,7 @@ const en = {
   'app.name': 'Campaign Composer',
   'nav.label': 'Main',
   'nav.campaigns': 'Campaigns',
+  'nav.assistant': 'Assistant',
   'language.label': 'Language',
 
   'api.checking': 'API: checking…',
@@ -233,6 +234,53 @@ const en = {
   'error.body_too_large': 'The campaign is too large.',
   'error.method_not_allowed': 'That action isn’t supported.',
   'error.unknown': 'Something went wrong. Try again.',
+  'error.assistant_busy': 'The assistant is busy right now. Try again in a moment.',
+  'error.assistant_unavailable': 'The assistant is unavailable right now. Try again later.',
+  'error.assistant_timeout': 'The assistant took too long to answer. Try again.',
+  'error.conversation_not_found':
+    'This conversation has expired. Send your message again to start a new one.',
+  'error.conversation_busy': 'The assistant is still answering your previous message.',
+  'error.conversation_full': 'This conversation is too long. Start a new one.',
+  'error.invalid_message': 'Write a message of at most 2,000 characters.',
+  'error.approval_not_found': 'This request has expired. Ask the assistant again.',
+  'error.approval_closed': 'This request has already been decided.',
+  'error.campaign_changed': 'The campaign changed after this request. Review it and ask again.',
+
+  'assistant.title': 'Campaign assistant',
+  'assistant.subtitle':
+    'Describe a campaign in any language. The assistant drafts it, estimates its audience and asks you before anything is sent.',
+  'assistant.examples': 'Try:',
+  'assistant.example1':
+    'Create an SMS campaign for customers in İstanbul who added something to their basket in the last week but haven’t bought it.',
+  'assistant.example2': 'How many customers in Germany spent more than 1,000 TRY in the last year?',
+  'assistant.example3': 'Schedule my latest draft for tomorrow at 10:00.',
+  'assistant.label': 'Message the assistant',
+  'assistant.placeholder': 'Message the assistant… (Enter sends, Shift+Enter starts a new line)',
+  'assistant.send': 'Send',
+  'assistant.thinking': 'Thinking…',
+  'assistant.new': 'New conversation',
+  'assistant.you': 'You',
+  'assistant.name': 'Assistant',
+  'assistant.refused': 'The assistant can’t help with that request.',
+  'assistant.stepLimit':
+    'The assistant stopped after too many steps. What it finished is shown above; send another message to continue.',
+  'assistant.interrupted':
+    'The assistant was interrupted before it could reply. What it finished is shown above; send another message to continue.',
+  'assistant.created': 'Draft created',
+  'assistant.updated': 'Draft updated',
+  'assistant.openEditor': 'Open in editor',
+  'assistant.estimate': 'Audience estimate',
+  'assistant.sendTitle': 'Send this campaign?',
+  'assistant.scheduleTitle': 'Schedule this campaign?',
+  'assistant.when': 'When',
+  'assistant.now': 'Right after approval',
+  'assistant.reach': 'Estimated reach',
+  'assistant.approve': 'Approve',
+  'assistant.approvalNote': 'Nothing is sent unless you approve it here.',
+  'assistant.dispatched': 'Approved: the campaign is being sent.',
+  'assistant.scheduled': 'Approved: scheduled for {time}.',
+  'assistant.cancelled': 'Cancelled: nothing was sent.',
+  'assistant.follow': 'Follow its delivery',
 }
 
 export default en

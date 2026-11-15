@@ -5,6 +5,7 @@ import {
   type RouterHistory,
 } from 'vue-router'
 
+import AssistantView from '@/views/AssistantView.vue'
 import CampaignEditView from '@/views/CampaignEditView.vue'
 import CampaignsView from '@/views/CampaignsView.vue'
 import CampaignView from '@/views/CampaignView.vue'
@@ -21,6 +22,7 @@ export function createAppRouter(history: RouterHistory = createWebHistory()) {
       { path: '/campaigns/new', name: 'new', component: CampaignEditView },
       { path: '/campaigns/:id(\\d+)', name: 'campaign', component: CampaignView, props: id },
       { path: '/campaigns/:id(\\d+)/edit', name: 'edit', component: CampaignEditView, props: id },
+      { path: '/assistant', name: 'assistant', component: AssistantView },
       { path: '/:unknown(.*)*', redirect: '/campaigns' },
     ],
   })
