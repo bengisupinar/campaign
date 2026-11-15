@@ -5,7 +5,7 @@ language; an LLM proposes audience segmentation rules and SMS/email content; peo
 edit and approve it; approved campaigns are sent asynchronously to synthetic users through
 mock providers, and delivery status is tracked in real time.
 
-> **Status — Phase 6 (frontend).** On top of the Phase 1 foundation (PostgreSQL, migrations,
+> **Status — Phase 7 (AI assistant).** On top of the Phase 1 foundation (PostgreSQL, migrations,
 > health probes, structured logs, graceful shutdown), the customer and commerce model holds
 > 5,000 synthetic customers and their shopping activity. The segmentation engine turns a
 > campaign's segment into the customers it reaches on each channel. A dispatched campaign is
@@ -19,7 +19,8 @@ mock providers, and delivery status is tracked in real time.
 > - sends or schedules them after a confirmation;
 > - follows their delivery live.
 >
-> AI arrives in the next phase.
+> An AI assistant (Claude, or an offline mock) drafts, changes, estimates and asks to send
+> campaigns from a chat in any language; only a person's approval in the app sends one.
 
 ## Quick start
 
@@ -72,6 +73,27 @@ remembered in the browser.
   step that has them is marked.
 - **A campaign's page** shows its details and, once dispatched, its delivery live. SMS and
   email are counted separately, by status: pending, accepted, delivered, failed and skipped.
+- **Assistant** is a chat: describe a campaign in any language, and the assistant drafts it,
+  changes it, estimates its audience or asks to send it. Drafts open in the composer; a send
+  waits for you to approve it on its card in the chat.
+
+### The AI assistant
+
+It uses an offline mock by default: a fixed script that drafts a demo campaign, estimates it
+and asks to send it, whatever you write. To chat with Claude, put this in `.env` (git-ignored)
+and restart (`docker compose up`):
+
+```sh
+LLM_PROVIDER=claude
+ANTHROPIC_API_KEY=sk-ant-...          # from https://console.anthropic.com
+ANTHROPIC_MODEL=claude-haiku-5-5      # optional; this is the default
+```
+
+Without a key, the assistant stays on the mock, and the API logs a warning.
+
+The assistant works only through its tools, validated by the API, and sees campaign settings
+and counts, never customers. Asking it to send a campaign shows an approval card; nothing is
+sent until you approve it there ([DECISIONS.md](DECISIONS.md) §29).
 
 ## Development
 
@@ -170,7 +192,8 @@ curl -X POST localhost:3000/api/campaigns -d '{
 - **Errors.** An invalid draft gets 422 with every problem, e.g.
   `{"error": "invalid_campaign", "problems": [{"field": "content.sms.body", "problem": "too_long"}]}`.
   Other errors are `{"error": "<code>"}`: `not_found`, `not_draft`, `already_dispatched`,
-  `malformed_json`, `body_too_large`.
+  `campaign_changed` (the draft was edited while being dispatched), `malformed_json`,
+  `body_too_large`.
 
 ### Dispatch and delivery progress
 
@@ -233,6 +256,7 @@ internal/commerce/        Commerce context: products, baskets, orders
 internal/segmentation/    segment engine: references, DSL → parameterised SQL, audience counts
                           and recipient batches per channel; the composer's read-only API
 internal/delivery/        sending: River jobs, mock providers, rate limits, progress and SSE
+internal/assistant/       AI assistant: Claude or a mock, its tools, conversations, approvals
 internal/seed/            deterministic synthetic data: catalogue, people, personas
 internal/platform/        cross-cutting technical code (no business rules)
   config/                 environment configuration, logger
@@ -278,20 +302,31 @@ Deliberately left out so far; each phase review adds what it defers.
 - [ ] **Indexes for larger data** ([DECISIONS.md](DECISIONS.md) §23): a covering index on order
       lines, and partial indexes for completed orders and granted permissions. Today's indexes
       serve 5,000 customers.
+- [ ] **Caching** of frequently read campaign data (e.g. Redis), if reads become a bottleneck.
+      Every read goes to PostgreSQL today.
 - [ ] **Suggestions for unknown names,** such as "İstanbul" for "Istanbul", in the `unknown`
       problem, for marketers and the AI repair loop. Names must match exactly today.
+- [ ] **Broader validation:** more input checks and business rules, beyond the draft, segment
+      and dispatch rules enforced today.
 - [ ] **A separate migration job in production,** with a DDL role, so the API can run with a
       DML-only role ([DECISIONS.md](DECISIONS.md) §6).
 - [ ] **Segment-aware SMS limits.** Count GSM-7 and UCS-2 message segments instead of 160
       characters: Turkish letters force UCS-2, which fits 70 characters per message. The
       composer would then show how many messages an SMS takes.
+- [ ] **Language variants in one campaign,** each customer receiving the text in their own
+      language. A campaign has one text per channel today.
 - [ ] **Optimistic locking for campaign drafts.** Concurrent edits are last-write-wins today.
-- [ ] **Dispatch exactly what was reviewed.** Dispatch could take the version the reviewer
-      approved (`If-Match` with the campaign's ETag) and answer 412 if the draft changed since.
-      Today an edit made after review is sent as edited.
+- [ ] **Similar-campaign detection:** a warning when a new campaign looks like an existing one,
+      by name, audience or content, to avoid duplicates.
+- [ ] **Dispatch exactly what was reviewed, from the composer too.** The assistant's approvals
+      already dispatch only the version approved (`DispatchApproved`). The REST dispatch could
+      take it as well (`If-Match` with the campaign's ETag, 412 if the draft changed since).
+      Today an edit made after review in the composer is sent as edited.
 - [ ] **Unschedule and cancel,** in the API and on the campaign page. The lifecycle allows
       scheduled → draft, but no endpoint does it yet, and a dispatch in progress can't be
       stopped.
+- [ ] **Delivery in each recipient's local time,** such as 10:00 wherever the customer is. A
+      schedule is one moment for every recipient today.
 - [ ] **Receipt timeout.** A real provider can lose a receipt, which would leave its message
       `accepted` and the progress never final.
 - [ ] **Cross-campaign delivery statistics,** for a dashboard; statistics are per campaign today.
@@ -307,10 +342,11 @@ Deliberately left out so far; each phase review adds what it defers.
       ceiling at much higher rates. One completion job per campaign, re-checking until nothing
       is pending, could take that work off every message without letting a campaign stay
       `sending` ([DECISIONS.md](DECISIONS.md) §25).
-- [ ] **Metrics** (`/metrics`) for sending throughput, failures and queue depth; logs and
-      River's job table are the only view today.
-- [ ] **Authentication and authorization,** such as who may dispatch. They are outside the
-      assessment's scope: anyone who reaches the API can send a campaign.
+- [ ] **Prometheus metrics** (`/metrics`) for the API and delivery: requests, sending
+      throughput, failures and queue depth. Logs and River's job table are the only view today.
+- [ ] **Authentication and authorization,** with roles and permissions, such as who may
+      dispatch. They are outside the assessment's scope: anyone who reaches the API can send a
+      campaign.
 - [ ] **Pagination, filters and search for the campaign list,** in the API and the web app.
 - [ ] **A shared error framework** with stable codes, translations and HTTP mapping at the API
       boundary. Error bodies are local to each capability's handlers today.
@@ -322,3 +358,12 @@ Deliberately left out so far; each phase review adds what it defers.
       only a campaign's own page follows them live.
 - [ ] **Dark mode.** The colours are tokens on `:root`, so a dark set could be added in one
       place.
+- [ ] **Assistant:**
+      - persisting conversations (kept in memory today, lost on restart);
+      - streaming replies;
+      - usage monitoring: tokens, API costs, latency and errors;
+      - prompt caching, so the instructions and tool definitions sent with every model call
+        cost less;
+      - images for email campaigns, generated to match their content;
+      - stronger guardrails;
+      - per-user conversations once there is authentication.

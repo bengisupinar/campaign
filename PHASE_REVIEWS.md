@@ -6,6 +6,88 @@ snapshots taken when a phase is finished; later phases add entries rather than r
 ones. The reasoning behind each choice is in [DECISIONS.md](DECISIONS.md), setup and commands
 are in [README.md](README.md).
 
+## Phase 7: AI assistant (2026-11-15)
+
+**Scope.** A chat, in any language, in which Claude drafts, changes, estimates and asks to send
+campaigns through six tools that Go validates and runs through the existing services. A dispatch
+waits for a person's approval in the app. The offline mock is the default.
+
+Simplified after review:
+- a cost-efficient model (`claude-haiku-5-5`), with no thinking, caching or beta features;
+- a fixed mock script;
+- minimal conversation state;
+- approvals bound atomically in the existing dispatch transaction.
+
+**Result.**
+- `make check` passes, and so does the Go suite against PostgreSQL with `-race`.
+- In Chrome, with the mock, through nginx, the full flow ran, with no console errors:
+  - a draft was created, opened in the editor and estimated;
+  - its dispatch was approved, and it went final with exactly the reach the card showed;
+  - a repeated approval got 409;
+  - another request was cancelled, in Turkish.
+
+### Components
+
+| Component | Location | What it does | Tests |
+|---|---|---|---|
+| Assistant | `internal/assistant` (`assistant.go`, `tools.go`, `tools.json`, `store.go`, `prompt.go`, `http.go`) | Tool loop with limits, allowlist and strict argument decoding, conversations and approvals in memory (a busy conversation is never evicted; a failed turn is kept once a tool changed something), `/api/assistant` | 11 unit tests (scripted model, fakes), including a turn held in flight while other goroutines fill the store; 5 integration tests (PostgreSQL, River); HTTP table |
+| Claude adapter | `internal/assistant/claude.go` | Messages API with tools; errors as busy, timeout or unavailable | Against an `httptest` fake of the API: request shape, tool loop, 5 failures |
+| Mock | `internal/assistant/mock.go` | Fixed script: draft, estimate, ask to send, help | Integration, with the real services |
+| Version-bound dispatch | `internal/campaign` (`service.go`, `store.go`) | `DispatchApproved`; the dispatch update checks `updated_at`; `ErrChanged`, 409 `campaign_changed` | Store: a stale copy is refused atomically; service: an approval after an edit |
+| Exports | `campaign.View`, `delivery.ReadProgress` | The campaign's API view and delivery counts, for tool results | Existing tests |
+| Configuration | `internal/platform/config`, `compose.yaml`, `.env.example`, nginx | `LLM_PROVIDER`, `ANTHROPIC_API_KEY` (never logged), `ANTHROPIC_MODEL`; Claude without a key falls back to the mock (`AssistantProvider`); a 120 s proxy read timeout | Config tables, including the fallback and the key's redaction |
+| Chat | `frontend/src/views/AssistantView.vue`, `components/AssistantAction.vue` | Messages, cards, approve or cancel, Retry, the notices, kept alive across pages | 8 flows through the whole app |
+
+Coverage: `internal/assistant` is 90.4 % with PostgreSQL and 82.4 % without.
+
+### Verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `make check` | Pass: lint with 0 issues; 87 frontend tests; build |
+| 2 | Go suite against PostgreSQL, with `-race` | Pass, every package, except one intermittent timing failure in `internal/delivery` (see below) |
+| 3 | Mutation check | Each fails its test:<br>• approvals reusable;<br>• the dispatch tool dispatching;<br>• no version in the dispatch update;<br>• unknown arguments accepted;<br>• the chat not kept alive;<br>• busy conversations evicted by expiry or by the limit;<br>• no busy check;<br>• the time to live counted from the start of a turn;<br>• every failed turn rolled back;<br>• an estimate counted as a change;<br>• tools run in the reply that reaches the limit;<br>• model calls continuing after the tool budget is spent |
+| 4 | Chrome, with the mock, through nginx | **Draft, then estimate:** the draft created, opened in the editor, and the conversation kept; 236 matched, 83 reachable by SMS.<br>**Approve:** the campaign went final with 83 recipients.<br>**A repeated approval:** `409 approval_closed`.<br>**A cancel, in Turkish:** nothing sent.<br>**Phone:** no horizontal overflow; no console errors |
+| 5 | Real Claude | Not run: no API key was configured. The adapter is tested against a fake of the API |
+
+### Deviations from the plan
+
+- **The plain dispatch also checks `updated_at`.** So the composer's dispatch sends only the
+  draft it checked; an edit in between gets 409 `campaign_changed`.
+- **The Go SDK sends the key as `Authorization: Bearer`,** which the adapter test checks.
+- **Claude without a key falls back to the mock** with a warning, rather than stopping at
+  startup as planned: a `.env` can select Claude before it has a key.
+
+### Review of conversations and the tool loop
+
+A review found three problems, fixed before the phase was committed:
+
+- **Eviction during a turn.** 500 new conversations during a turn could evict it: its tools
+  still ran, but its next message got 404 and its approvals disappeared. A conversation is now
+  busy, under the store's lock, from the start of a turn to its end, and nothing evicts it
+  meanwhile. When all 500 are busy, a new conversation gets 503 `assistant_busy`. The time to
+  live counts from the end of the last turn.
+- **Rollback after changes.** A model failure, timeout or cancellation after a tool had
+  created or changed a draft, or recorded a dispatch request, dropped the whole turn: the card
+  was lost, and a retry could create a duplicate. Such a turn is now kept and answered with its
+  cards and the notice `interrupted`. A turn that changed nothing is still dropped.
+- **Limits.** The reply that reached the model-call limit ran tools whose results the model
+  never saw, and once the tool budget was spent the loop kept calling the model only to refuse
+  its tools. That reply now runs no tools, and at most one model call follows a spent budget.
+
+### Worth a closer look
+
+- **The assistant's natural-language behaviour is untested** without a key. Try it with
+  `LLM_PROVIDER=claude` before relying on it.
+- **Conversations and approvals live in one API process** and are lost on restart.
+- **No authentication:** conversation and approval IDs are unguessable but act as bearer
+  tokens.
+- **`TestRateLimitPerChannel` (Phase 5) is intermittent.** It failed once in the full suite
+  (101 calls recorded within 946 ms) and once in three runs alone. It records each call's time
+  after the limiter lets it through, so scheduling delays under `-race` can make calls look
+  closer together than they were. Its 10 ms tolerance is probably too tight; the limiter
+  itself is unchanged.
+
 ## Phase 6: Frontend: campaigns, composer, live delivery, English and Turkish (2026-11-15)
 
 **Scope.** The marketer's interface, on the existing Vue 3 + TypeScript + Vite app:

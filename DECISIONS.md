@@ -5,7 +5,7 @@ the project evolves; a superseded decision is marked as such rather than deleted
 Phase 1 (project foundation, entries 1–12) and Phase 2A (customer and commerce, 13–17)
 decisions were recorded on 2026-11-13; Phase 2B (seeding, 18), Phase 3 (campaigns, 19–21),
 Phase 4 (segmentation, 22–23) and Phase 5 (delivery, 24–26) on 2026-11-14, and Phase 6
-(frontend, 27–28) on 2026-11-15.
+(frontend, 27–28) and Phase 7 (AI assistant, 29) on 2026-11-15.
 
 ## 1. One repository: Go module at the root, Vue app in `frontend/`
 
@@ -771,10 +771,55 @@ Simplicity and few dependencies come first.
 - **Drafts still save only when complete** (decision 19), so Save draft points at what's
   missing.
 
+## 29. AI assistant: Claude tools validated in Go, dispatch only on approval
+
+**Context.** Marketers should create, change, analyse and dispatch campaigns by chatting, in
+any language. The model's output is untrusted. It must reuse the campaign rules and never send
+on its own, and customers' data must not reach it.
+
+**Decision.** `internal/assistant`:
+
+- **The model.**
+  - The standard Anthropic Messages API, with native tool calls.
+  - `claude-haiku-5-5` by default, cost-efficient and fast; `ANTHROPIC_MODEL` changes it.
+  - No thinking configuration, prompt caching or beta features.
+  - `LLM_PROVIDER=mock` (the default) plays a fixed script offline; `claude` without a key
+    falls back to it, with a warning. Tests use scripted models and a fake of the API, and make
+    no paid calls.
+- **Six tools, an explicit allowlist:** `create_campaign`, `update_campaign`, `get_campaign`,
+  `list_campaigns` (to find a campaign by name), `estimate_audience`, `dispatch_campaign`.
+  - The JSON schemas describe them to the model.
+  - Go decodes each call into a typed struct that rejects unknown fields, then runs it through
+    the campaign and segmentation services. Their problems go back to the model to repair.
+  - Strict tool schemas aren't used: segments nest, which they can't express.
+- **Privacy.** Results carry campaign settings, templates, statuses and aggregate counts only.
+- **Dispatch.** `dispatch_campaign` only records a request, bound to the campaign's version
+  (`updated_at`). `POST /api/assistant/approvals/{id}` closes it once, then calls
+  `campaign.Service.DispatchApproved`.
+  - That method's transaction updates `WHERE status = 'draft' AND updated_at = ?`.
+  - A draft edited since fails atomically with `ErrChanged`.
+  - The plain dispatch now uses the same condition, so it too sends only the draft it checked.
+- **Conversations live in memory:** 2 h after their last turn ended, at most 500, with limits
+  per turn and per conversation.
+  - A conversation answering a message is busy: other messages to it get `conversation_busy`,
+    and neither expiry nor the 500 limit evicts it. When all 500 are busy, a new conversation
+    gets `assistant_busy`.
+  - A failed turn is dropped, unless a tool already changed something (a draft, or a dispatch
+    request). Then it is kept and answered with its cards and the notice `interrupted`, so a
+    retry can't repeat the change unseen.
+  - The model reply that reaches a turn's limit runs no tools, since the model would not see
+    their results; the turn ends with `step_limit`.
+
+**Consequences.**
+
+- Conversations are lost on restart, and one API instance is assumed.
+- Natural-language behaviour is checked by hand with a key.
+- Answers the open question about running without a key.
+
 ## Open questions for later phases
 
-- **LLM without an API key:** select the mock provider when `ANTHROPIC_API_KEY` is empty, so the
-  single command keeps working.
+- **LLM without an API key:** answered by decision 29: the mock is the default, and Claude
+  without a key falls back to it, so the single command keeps working.
 - **Segmentation rules:** answered by decisions 20 and 22: a whitelisted DSL validated on
   save, compiled to parameterised queries.
 - **Real-time status:** answered by decision 26: server-sent events, each stream reading the
