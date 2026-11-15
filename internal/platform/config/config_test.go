@@ -22,10 +22,12 @@ func TestLoad(t *testing.T) {
 			name:    "defaults",
 			environ: []string{"DATABASE_URL=" + testDSN},
 			want: config.Config{
-				HTTPAddr:    ":8080",
-				DatabaseURL: testDSN,
-				LogLevel:    slog.LevelInfo,
-				LogFormat:   config.LogFormatJSON,
+				HTTPAddr:       ":8080",
+				DatabaseURL:    testDSN,
+				LogLevel:       slog.LevelInfo,
+				LogFormat:      config.LogFormatJSON,
+				LLMProvider:    config.LLMProviderMock,
+				AnthropicModel: "claude-haiku-5-5",
 			},
 		},
 		{
@@ -35,12 +37,18 @@ func TestLoad(t *testing.T) {
 				"HTTP_ADDR=127.0.0.1:9000",
 				"LOG_LEVEL=debug",
 				"LOG_FORMAT=TEXT",
+				"LLM_PROVIDER=Claude",
+				"ANTHROPIC_API_KEY=sk-test",
+				"ANTHROPIC_MODEL=claude-sonnet-5-5",
 			},
 			want: config.Config{
-				HTTPAddr:    "127.0.0.1:9000",
-				DatabaseURL: testDSN,
-				LogLevel:    slog.LevelDebug,
-				LogFormat:   config.LogFormatText,
+				HTTPAddr:        "127.0.0.1:9000",
+				DatabaseURL:     testDSN,
+				LogLevel:        slog.LevelDebug,
+				LogFormat:       config.LogFormatText,
+				LLMProvider:     config.LLMProviderClaude,
+				AnthropicAPIKey: "sk-test",
+				AnthropicModel:  "claude-sonnet-5-5",
 			},
 		},
 		{
@@ -62,6 +70,23 @@ func TestLoad(t *testing.T) {
 			name:     "invalid log format",
 			environ:  []string{"DATABASE_URL=" + testDSN, "LOG_FORMAT=xml"},
 			wantErrs: []string{"xml"},
+		},
+		{
+			name:    "Claude without an API key loads (the assistant falls back to the mock)",
+			environ: []string{"DATABASE_URL=" + testDSN, "LLM_PROVIDER=claude"},
+			want: config.Config{
+				HTTPAddr:       ":8080",
+				DatabaseURL:    testDSN,
+				LogLevel:       slog.LevelInfo,
+				LogFormat:      config.LogFormatJSON,
+				LLMProvider:    config.LLMProviderClaude,
+				AnthropicModel: "claude-haiku-5-5",
+			},
+		},
+		{
+			name:     "invalid LLM provider",
+			environ:  []string{"DATABASE_URL=" + testDSN, "LLM_PROVIDER=gpt"},
+			wantErrs: []string{"gpt"},
 		},
 		{
 			name:     "reports every error at once",
@@ -135,12 +160,36 @@ func TestConfigLogValueRedactsDatabaseURL(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
 	logger.Info("starting", slog.Any("config", config.Config{
-		HTTPAddr:    ":8080",
-		DatabaseURL: testDSN,
-		LogFormat:   config.LogFormatJSON,
+		HTTPAddr:        ":8080",
+		DatabaseURL:     testDSN,
+		LogFormat:       config.LogFormatJSON,
+		AnthropicAPIKey: "sk-ant-secret",
 	}))
 
-	if out := buf.String(); strings.Contains(out, "s3cret") || strings.Contains(out, "postgres://") {
+	if out := buf.String(); strings.Contains(out, "s3cret") || strings.Contains(out, "postgres://") || strings.Contains(out, "sk-ant-secret") {
 		t.Fatalf("logged config leaks the database URL: %s", out)
+	}
+}
+
+func TestAssistantProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider config.LLMProvider
+		key      string
+		want     config.LLMProvider
+	}{
+		{"the mock", config.LLMProviderMock, "", config.LLMProviderMock},
+		{"the mock, even with a key", config.LLMProviderMock, "sk-test", config.LLMProviderMock},
+		{"Claude with a key", config.LLMProviderClaude, "sk-test", config.LLMProviderClaude},
+		{"Claude without a key falls back to the mock", config.LLMProviderClaude, "", config.LLMProviderMock},
+		{"Claude with a blank key falls back to the mock", config.LLMProviderClaude, "  ", config.LLMProviderMock},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Config{LLMProvider: tt.provider, AnthropicAPIKey: tt.key}
+			if got := cfg.AssistantProvider(); got != tt.want {
+				t.Errorf("AssistantProvider() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

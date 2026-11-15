@@ -53,8 +53,9 @@ type handler struct {
 	logger    *slog.Logger
 }
 
-// snapshot is a campaign's delivery progress.
-type snapshot struct {
+// Progress is a campaign's delivery progress: counts by status, overall and per channel. It
+// holds no recipient: the assistant shows it to the model as it is.
+type Progress struct {
 	Status      campaign.Status            `json:"status"`
 	ScheduledAt *time.Time                 `json:"scheduled_at"`
 	StartedAt   *time.Time                 `json:"started_at"`
@@ -93,16 +94,21 @@ func (t *tally) add(status string, n int) {
 	}
 }
 
-func (h *handler) snapshot(ctx context.Context, id int64) (snapshot, error) {
+func (h *handler) snapshot(ctx context.Context, id int64) (Progress, error) {
 	c, err := h.campaigns.Get(ctx, id)
 	if err != nil {
-		return snapshot{}, err
+		return Progress{}, err
 	}
-	counts, recipients, err := newStore(h.db).counts(ctx, id)
+	return ReadProgress(ctx, h.db, c)
+}
+
+// ReadProgress reads campaign c's delivery progress.
+func ReadProgress(ctx context.Context, db *gorm.DB, c *campaign.Campaign) (Progress, error) {
+	counts, recipients, err := newStore(db).counts(ctx, c.ID())
 	if err != nil {
-		return snapshot{}, err
+		return Progress{}, err
 	}
-	s := snapshot{
+	s := Progress{
 		Status:      c.Status(),
 		ScheduledAt: nullTime(c.ScheduledAt()),
 		StartedAt:   nullTime(c.StartedAt()),
@@ -198,7 +204,7 @@ type eventStream struct {
 }
 
 // send writes s as an event of the given type ("" for the default) and returns its JSON.
-func (s eventStream) send(event string, v snapshot) ([]byte, error) {
+func (s eventStream) send(event string, v Progress) ([]byte, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, err

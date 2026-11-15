@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "segment": {
+      "type": "object",
+      "description": "Who receives the campaign (segment DSL version 1). The conditions combine with match: \"all\" (AND) or \"any\" (OR). No conditions means every customer.",
+      "properties": {
+        "version": { "type": "integer", "enum": [1] },
+        "match": { "type": "string", "enum": ["all", "any"] },
+        "conditions": { "type": "array", "items": { "$ref": "#/$defs/condition" } }
+      },
+      "required": ["version", "match", "conditions"],
+      "additionalProperties": false
+    },
+    "condition": {
+      "type": "object",
+      "description": "One test of a customer. Each type takes only its own parameters: country, city, language: in (country codes, city names or language codes, from the reference data); signed_up: within_days; basket and purchased: within_days and categories, both optional; order_count: min and/or max number of orders, within_days optional; total_spent: min and/or max in kuruş (100 kuruş = 1 TRY), within_days optional; group: match and conditions, nested at most 3 levels deep. negate excludes the customers the condition matches. Only completed orders count. At most 20 conditions in a segment.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["country", "city", "language", "signed_up", "basket", "purchased", "order_count", "total_spent", "group"]
+        },
+        "negate": { "type": "boolean" },
+        "in": { "type": "array", "items": { "type": "string" } },
+        "within_days": { "type": "integer", "description": "1 to 3650: the last N days." },
+        "categories": { "type": "array", "items": { "type": "string" } },
+        "min": { "type": "integer" },
+        "max": { "type": "integer" },
+        "match": { "type": "string", "enum": ["all", "any"] },
+        "conditions": { "type": "array", "items": { "$ref": "#/$defs/condition" } }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "description": "The message for each channel the campaign uses; leave a channel out to not use it. Texts may use the placeholders {{first_name}}, {{last_name}} and {{city}}, and no others.",
+      "properties": {
+        "sms": {
+          "type": "object",
+          "properties": { "body": { "type": "string", "description": "At most 160 characters as written." } },
+          "required": ["body"],
+          "additionalProperties": false
+        },
+        "email": {
+          "type": "object",
+          "properties": {
+            "subject": { "type": "string", "description": "At most 80 characters." },
+            "body": { "type": "string" }
+          },
+          "required": ["subject", "body"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "tools": [
+    {
+      "name": "create_campaign",
+      "description": "Create a campaign draft. It is saved only when complete and valid; otherwise the result lists its problems by field path, to fix and try again. Returns the saved campaign.",
+      "properties": {
+        "name": { "type": "string", "description": "The campaign's name, at most 100 characters." },
+        "segment": { "$ref": "#/$defs/segment" },
+        "content": { "$ref": "#/$defs/content" }
+      },
+      "required": ["name", "segment", "content"]
+    },
+    {
+      "name": "update_campaign",
+      "description": "Change a draft campaign. Each field given replaces the current one whole (name, segment or content); fields left out stay as they are. Only drafts can change. Returns the saved campaign, or its problems.",
+      "properties": {
+        "campaign_id": { "type": "integer" },
+        "name": { "type": "string" },
+        "segment": { "$ref": "#/$defs/segment" },
+        "content": { "$ref": "#/$defs/content" }
+      },
+      "required": ["campaign_id"]
+    },
+    {
+      "name": "get_campaign",
+      "description": "Get a campaign: its status, times, segment and messages, and, once dispatched, its delivery counts by status and channel.",
+      "properties": {
+        "campaign_id": { "type": "integer" }
+      },
+      "required": ["campaign_id"]
+    },
+    {
+      "name": "list_campaigns",
+      "description": "List every campaign, newest first: id, name, status, channels and when it last changed. Use it to find a campaign the user names.",
+      "properties": {}
+    },
+    {
+      "name": "estimate_audience",
+      "description": "Count the customers a segment matches, and how many can be reached by email, by SMS and by either (they have the contact detail and gave permission). Give either a segment or the id of a campaign, not both. Returns counts only.",
+      "properties": {
+        "segment": { "$ref": "#/$defs/segment" },
+        "campaign_id": { "type": "integer" }
+      }
+    },
+    {
+      "name": "dispatch_campaign",
+      "description": "Ask the user to approve sending a draft campaign, now or at scheduled_at. This sends nothing: the app shows the user a card with the campaign, its reach and time, to approve or cancel. Only that approval sends the campaign.",
+      "properties": {
+        "campaign_id": { "type": "integer" },
+        "scheduled_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 time with an offset, in the future and at most a year ahead. Leave out to send right after approval."
+        }
+      },
+      "required": ["campaign_id"]
+    }
+  ]
+}

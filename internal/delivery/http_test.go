@@ -38,14 +38,14 @@ func get(ctx context.Context, t *testing.T, url string) *http.Response {
 	return res
 }
 
-func getSnapshot(t *testing.T, srv *httptest.Server, id int64) snapshot {
+func getSnapshot(t *testing.T, srv *httptest.Server, id int64) Progress {
 	t.Helper()
 	res := get(t.Context(), t, fmt.Sprintf("%s/api/campaigns/%d/delivery", srv.URL, id))
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("GET delivery: status %d", res.StatusCode)
 	}
-	var s snapshot
+	var s Progress
 	check(t, json.NewDecoder(res.Body).Decode(&s))
 	return s
 }
@@ -92,7 +92,7 @@ func TestDeliverySnapshot(t *testing.T) {
 // event is one server-sent event.
 type event struct {
 	name     string
-	snapshot snapshot
+	snapshot Progress
 }
 
 // readEvents reads events until the stream ends.

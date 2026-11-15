@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bengisupinar/campaign/internal/assistant"
 	"github.com/bengisupinar/campaign/internal/campaign"
 	"github.com/bengisupinar/campaign/internal/delivery"
 	"github.com/bengisupinar/campaign/internal/platform/config"
@@ -75,6 +76,16 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	router.Mount("/api/campaigns", campaign.NewHandler(campaigns, logger))
 	router.Mount("/api/segments", segmentation.NewHandler(segments, time.Now, logger))
 
+	model, err := newModel(cfg, logger)
+	if err != nil {
+		return err
+	}
+	progress := func(ctx context.Context, c *campaign.Campaign) (delivery.Progress, error) {
+		return delivery.ReadProgress(ctx, db, c)
+	}
+	assistants := assistant.NewService(campaigns, segments, progress, model, time.Now, logger)
+	router.Mount("/api/assistant", assistant.NewHandler(assistants, logger))
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.HTTPAddr)
 	if err != nil {
@@ -83,4 +94,16 @@ func run(ctx context.Context, environ []string, logOutput io.Writer) error {
 	logger.Info("http server listening", slog.String("addr", ln.Addr().String()))
 
 	return httpserver.Serve(ctx, logger, ln, router)
+}
+
+// newModel returns the assistant's language model: Claude when configured with an API key,
+// else the offline mock.
+func newModel(cfg config.Config, logger *slog.Logger) (assistant.Model, error) {
+	if cfg.AssistantProvider() == config.LLMProviderClaude {
+		return assistant.NewClaude(cfg.AnthropicAPIKey, cfg.AnthropicModel)
+	}
+	if cfg.LLMProvider == config.LLMProviderClaude {
+		logger.Warn("LLM_PROVIDER=claude without ANTHROPIC_API_KEY: the assistant uses the offline mock")
+	}
+	return assistant.NewMock(), nil
 }
