@@ -6,6 +6,128 @@ snapshots taken when a phase is finished; later phases add entries rather than r
 ones. The reasoning behind each choice is in [DECISIONS.md](DECISIONS.md), setup and commands
 are in [README.md](README.md).
 
+## Phase 6: Frontend: campaigns, composer, live delivery, English and Turkish (2026-11-15)
+
+**Scope.** The marketer's interface, on the existing Vue 3 + TypeScript + Vite app:
+
+- **Campaigns.**
+  - A list with statuses, channels and the time that matters.
+  - A details page.
+  - Edit and delete for drafts, following the lifecycle.
+- **Composer.** A three-step wizard:
+  1. **Audience.** A visual builder covering every condition type, AND/OR groups nested to the
+     language's limit, and exclusion, with a live estimate.
+  2. **Messages.** SMS and email, each with counters, placeholders and previews.
+  3. **Review.** Save, send now or schedule, after a confirmation.
+- **Delivery.** Live progress over SSE, with SMS and email apart, the five message statuses,
+  reconnection and a final state.
+- **Languages.** English (the default) and Turkish, switched in the header and remembered.
+- **Backend.** A read-only segment API for the composer: what a segment can name, and the
+  audience estimate.
+
+Decisions taken while planning:
+
+- Vue Router only: no Pinia, component library or i18n library;
+- state local to each page and component;
+- the draft rules mirrored on the client, with the API authoritative;
+- the wizard takes a draft and never loads one (the Phase 7 seam);
+- counts only, with no preview of recipients;
+- save, then dispatch.
+
+Not built yet: a preview of sample recipients, browser end-to-end tests in CI, list filters
+and pagination, live statuses in the list, unscheduling and cancelling, dark mode, and AI.
+
+**Result.**
+
+- `make check` passes, and so do the Go tests against PostgreSQL; there are 79 frontend tests.
+- **In Chrome, through nginx:**
+  - campaigns were composed, estimated, sent and followed to final, in both languages;
+  - one was scheduled through the UI, and River started it 11 ms after its time;
+  - the live progress reconnected after an API restart mid-stream;
+  - no console errors.
+- **One bug found in the browser, and fixed:** a saved draft reopened with its later steps
+  locked.
+
+### How the pieces fit
+
+```text
+App.vue ─ header (language, API status), notices, RouterView
+  /campaigns            CampaignsView ─ listCampaigns, deleteCampaign (ConfirmDialog)
+  /campaigns/new        CampaignEditView ─ emptyDraft() ─┐
+  /campaigns/:id/edit   CampaignEditView ─ getCampaign ──┴─► CampaignWizard (owns the draft)
+                          1 SegmentGroup ⟲ ConditionRow  (choices: GET /api/segments/options)
+                            AudienceEstimate ─ POST /api/segments/audience (400 ms after a change)
+                          2 MessageEditor: counters, placeholders, previews
+                          3 CampaignSummary, AudienceEstimate, when ─► ConfirmDialog
+                            ─► POST or PUT /api/campaigns ─► POST /api/campaigns/{id}/dispatch
+  /campaigns/:id        CampaignView ─ CampaignSummary, DeliveryMonitor ─ EventSource …/delivery/events
+validateDraft (campaign.ts) and the API's 422 problems: one {field, problem} shape, shown by path
+```
+
+### Components
+
+| Component | Location | What it does | Tests |
+|---|---|---|---|
+| Segment API | `internal/segmentation/http.go`, `references.go` | `GET /options` and `POST /audience`; counts only; problems as 422 `invalid_segment` | 10 HTTP cases on the hand-made dataset |
+| Language list | `internal/customer/language.go` | `Languages()`, which `Valid` uses | Existing cases |
+| API client | `frontend/src/api.ts` | JSON types, one function per endpoint, `ApiError`, `errorText` | 8 |
+| Draft rules | `frontend/src/campaign.ts` | `validateDraft` mirroring `internal/campaign`; `fill`; the schedule check; `problemText` | 30 |
+| Languages | `frontend/src/i18n.ts`, `locales/` | `t`, the choice in `localStorage`, `Intl` formatting; 203 texts per language | 6, and 2 in `App` |
+| Composer | `CampaignWizard.vue` | The draft, steps and problems; save; send or schedule; leaving with unsaved changes | 7 flows through the whole app |
+| Segment builder | `SegmentGroup.vue`, `ConditionRow.vue` | Groups, conditions, exclusion, choices from the options, limits | 7 |
+| Messages | `MessageEditor.vue` | Channels, counters, placeholders at the cursor, previews | 5 |
+| Estimate | `AudienceEstimate.vue` | Waits for a pause, cancels stale requests, stops while there are problems | Through the composer flows |
+| Delivery monitor | `DeliveryMonitor.vue` | SSE, reopening with backoff, the final state, counts per channel | 5 |
+| Pages | `views/` | List, edit, details | List: 4; the others through the flows |
+
+Coverage: `internal/segmentation` is 89.5 % with PostgreSQL. Frontend coverage isn't measured,
+since no coverage provider is installed.
+
+### Verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `make check` | Pass:<br>• Go tests with `-race`, and lint with 0 issues;<br>• frontend oxlint, eslint, prettier and type-check;<br>• 79 tests;<br>• a build of 156 kB of JavaScript (54 kB gzipped) |
+| 2 | Go tests against PostgreSQL, with `-race` | Pass, including the segment API's 10 cases |
+| 3 | Mutation check | Each change fails its test:<br>• no reopening after `CLOSED`;<br>• dispatch without waiting for the confirmation;<br>• the language not remembered;<br>• nested groups past the limit;<br>• no `too_deep` rule;<br>• a saved draft with its steps locked |
+| 4 | Running stack, API through nginx | **Options:** 3 countries, 28 cities, 8 categories, 3 languages.<br>**Everyone:** 5,000 matched and 3,552 reachable (2,663 by email, 1,883 by SMS), the same 3,552 recipients Phase 5's dispatch prepared.<br>**The Phase 2A example:** 150 matched, 106 reachable.<br>**An unknown city:** 422 at `segment.conditions[0].in[0]` |
+| 5 | Headless Chrome through nginx (playwright-core driving the installed Chrome) | **English:** a segment with a city, an excluded purchase and a nested OR group (language, order count) estimated at 741 matched. SMS and email had placeholders inserted at the cursor. The confirmation stated a reach of 538; 12 s later the campaign was final with 538 recipients and 691 messages.<br>**Turkish:** the four other condition types, with total spent entered in lira and stored as 50,000 kuruş. The draft was saved, reloaded and edited, then scheduled from the review step for 21:27:00; River started it at 21:27:00.011, and it went final with 14 recipients. The language stayed Turkish across a reload.<br>**API restarted mid-stream** on a 4,546-message campaign: Live → Reconnecting… → Live, then final.<br>**Also:**<br>• a draft deleted from the list after confirmation;<br>• a keyboard pass: a logical tab order, and Space ticks a choice;<br>• a 390 px phone width with no horizontal scrolling;<br>• no console errors |
+| 6 | Cleanup | The test campaigns, their deliveries, jobs and mock rows were deleted; 5,000 customers remain |
+
+### Deviations from the plan
+
+- **A bug the browser found.** A saved draft reopened with its later steps locked, so "Review
+  and send" on a draft's page couldn't open step 3. A saved draft is complete, so all its
+  steps open now, also after a first save. A test covers it.
+- **Number fields commit on change** (leaving the field, or Enter), not on every keystroke.
+  Re-rendering a parsed lira amount while typing would turn "10.0" into "10".
+- **Vue Router 5** installs its optional build plugin's dependencies (33 packages); none reach
+  the bundle (DECISIONS.md §28).
+- **Test setup.**
+  - Node 26's own `localStorage` hides jsdom's, so Vitest runs with
+    `--no-experimental-webstorage`.
+  - jsdom has no modal dialogs, so a setup file gives `<dialog>` stand-in `showModal` and
+    `close` methods.
+  - The tests' TypeScript configuration now uses the app's ES2022 library.
+- **Small backend changes:**
+  - `customer.Languages()`;
+  - two stale package comments fixed: campaign's "nothing schedules or sends them yet", and
+    segmentation's "no REST API".
+
+### Worth a closer look
+
+- **The rules exist twice,** in `internal/campaign` and `frontend/src/campaign.ts`. A drift is
+  caught on save, where the API's problem shows at the same field, but the two must change
+  together (CLAUDE.md).
+- **One stream per open campaign page,** each reading the database every second (decision 26).
+  A scheduled campaign's page keeps its stream open until it is sent.
+- **The estimate** is as of now. The audience at dispatch can differ, and permissions are
+  checked again when sending.
+- **Reference names are shown as stored:** category names stay English in the Turkish
+  interface.
+- **No browser tests in CI.** Component tests run in jsdom, with stand-ins for `<dialog>` and
+  `EventSource`; the browser checks above were run for this review.
+
 ## Phase 5: Delivery, dispatch API and live progress (2026-11-14)
 
 **Scope.** Dispatched campaigns are sent asynchronously through mock SMS and email providers,

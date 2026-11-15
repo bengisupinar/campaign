@@ -2,7 +2,7 @@
 // customers, on SMS, email or both, from draft to delivery.
 //
 // Manual editing and, later, AI proposals both go through Service, so one set of rules applies
-// to every campaign. For now campaigns are only drafted: nothing schedules or sends them yet.
+// to every campaign. Dispatch hands a campaign to the delivery capability, which sends it.
 package campaign
 
 import (

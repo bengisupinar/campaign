@@ -5,14 +5,21 @@ language; an LLM proposes audience segmentation rules and SMS/email content; peo
 edit and approve it; approved campaigns are sent asynchronously to synthetic users through
 mock providers, and delivery status is tracked in real time.
 
-> **Status — Phase 5 (delivery).** On top of the Phase 1 foundation (PostgreSQL,
-> migrations, health probes, structured logs, graceful shutdown, and a web app showing the
-> API's readiness), the customer and commerce model holds 5,000 synthetic customers and their
-> shopping activity. Marketers manage campaign drafts through the REST API, and the
-> segmentation engine turns a draft's segment into the customers it reaches on each channel.
-> A draft is dispatched now or at a scheduled time. A worker then sends it through mock SMS
-> and email providers at 100 messages per second per channel, and its progress streams live
-> as server-sent events. AI and the frontend arrive in later phases.
+> **Status — Phase 6 (frontend).** On top of the Phase 1 foundation (PostgreSQL, migrations,
+> health probes, structured logs, graceful shutdown), the customer and commerce model holds
+> 5,000 synthetic customers and their shopping activity. The segmentation engine turns a
+> campaign's segment into the customers it reaches on each channel. A dispatched campaign is
+> sent by a worker through mock SMS and email providers at 100 messages per second per
+> channel, now or at a scheduled time, and its progress streams live.
+>
+> The web app, in English or Turkish:
+> - lists campaigns;
+> - composes them in three steps: an audience with a live estimate, messages with previews, and
+>   a review;
+> - sends or schedules them after a confirmation;
+> - follows their delivery live.
+>
+> AI arrives in the next phase.
 
 ## Quick start
 
@@ -43,6 +50,28 @@ remove the volume with `docker compose down -v`. Every email address is on a dom
 for examples, and every phone number is synthetic.
 
 The first build downloads the base images and takes a few minutes.
+
+## Using the web app
+
+Open http://localhost:3000. The header switches between English and Turkish; the choice is
+remembered in the browser.
+
+- **Campaigns** lists every campaign with its status and channels. Drafts can be edited or
+  deleted; anything else can be viewed.
+- **New campaign** opens the composer:
+  1. **Audience.** Combine conditions with AND or OR, nest groups, and exclude any condition or
+     group. Countries, cities, languages and categories are chosen from lists. The estimate
+     beside the builder shows how many customers match, and how many each channel can reach.
+  2. **Message.** Turn SMS and email on independently. Insert `{{first_name}}`,
+     `{{last_name}}` and `{{city}}` at the cursor. Counters show the limits (SMS 160 characters,
+     subject 80), and previews fill the placeholders with sample values.
+  3. **Review and send.** A summary and the reach on the chosen channels. Save the draft, send
+     it now, or schedule it; sending asks for confirmation first.
+
+  A draft is saved only once it is complete: problems are shown next to their field, and the
+  step that has them is marked.
+- **A campaign's page** shows its details and, once dispatched, its delivery live. SMS and
+  email are counted separately, by status: pending, accepted, delivered, failed and skipped.
 
 ## Development
 
@@ -176,6 +205,22 @@ curl -N localhost:3000/api/campaigns/1/delivery/events                     # fol
 - **Exactly once?** Retries carry an idempotency key, so a message reaches its provider once.
   [DECISIONS.md](DECISIONS.md) §25 explains the limits.
 
+### Segment options and audience estimate
+
+The composer's read-only segment API ([DECISIONS.md](DECISIONS.md) §27):
+
+| Request | Result |
+|---|---|
+| `GET /api/segments/options` | 200 and what a segment can name: countries, cities, categories and languages |
+| `POST /api/segments/audience` | 200 and `{matched, reachable, by_channel}` for the segment in the body; 422 `invalid_segment` with the same problems as a draft |
+
+```sh
+curl -X POST localhost:3000/api/segments/audience -d '{"segment": {"version": 1,
+  "match": "all", "conditions": [{"type": "city", "in": ["İstanbul"]}]}}'
+```
+
+It answers with counts only, never with customers.
+
 ## Project layout
 
 ```
@@ -186,7 +231,7 @@ internal/campaign/        Campaign context: drafts, lifecycle, dispatch, segment
 internal/customer/        Customer context: customers, contact details, permissions, cities
 internal/commerce/        Commerce context: products, baskets, orders
 internal/segmentation/    segment engine: references, DSL → parameterised SQL, audience counts
-                          and recipient batches per channel
+                          and recipient batches per channel; the composer's read-only API
 internal/delivery/        sending: River jobs, mock providers, rate limits, progress and SSE
 internal/seed/            deterministic synthetic data: catalogue, people, personas
 internal/platform/        cross-cutting technical code (no business rules)
@@ -197,6 +242,11 @@ internal/platform/        cross-cutting technical code (no business rules)
   httpserver/             router, middleware, JSON helpers, server lifecycle
 migrations/               versioned SQL migrations (goose), embedded in the binary; schema tests
 frontend/                 Vue 3 + TypeScript + Vite app, its Dockerfile and nginx config
+  src/api.ts              every API request and its JSON types
+  src/campaign.ts         the draft rules mirrored from internal/campaign; placeholders
+  src/i18n.ts, locales/   English and Turkish texts; dates, numbers and money via Intl
+  src/views/              campaign list, composer and campaign pages
+  src/components/         wizard, segment builder, message editor, estimate, delivery monitor
 compose.yaml              postgres, seed (one-shot), api, worker (exactly one), web
 ```
 
@@ -233,13 +283,15 @@ Deliberately left out so far; each phase review adds what it defers.
 - [ ] **A separate migration job in production,** with a DDL role, so the API can run with a
       DML-only role ([DECISIONS.md](DECISIONS.md) §6).
 - [ ] **Segment-aware SMS limits.** Count GSM-7 and UCS-2 message segments instead of 160
-      characters: Turkish letters force UCS-2, which fits 70 characters per message.
+      characters: Turkish letters force UCS-2, which fits 70 characters per message. The
+      composer would then show how many messages an SMS takes.
 - [ ] **Optimistic locking for campaign drafts.** Concurrent edits are last-write-wins today.
 - [ ] **Dispatch exactly what was reviewed.** Dispatch could take the version the reviewer
       approved (`If-Match` with the campaign's ETag) and answer 412 if the draft changed since.
       Today an edit made after review is sent as edited.
-- [ ] **Unschedule and cancel.** The lifecycle allows scheduled → draft, but no endpoint does it
-      yet, and a dispatch in progress can't be stopped.
+- [ ] **Unschedule and cancel,** in the API and on the campaign page. The lifecycle allows
+      scheduled → draft, but no endpoint does it yet, and a dispatch in progress can't be
+      stopped.
 - [ ] **Receipt timeout.** A real provider can lose a receipt, which would leave its message
       `accepted` and the progress never final.
 - [ ] **Cross-campaign delivery statistics,** for a dashboard; statistics are per campaign today.
@@ -259,6 +311,14 @@ Deliberately left out so far; each phase review adds what it defers.
       River's job table are the only view today.
 - [ ] **Authentication and authorization,** such as who may dispatch. They are outside the
       assessment's scope: anyone who reaches the API can send a campaign.
-- [ ] **Pagination for the campaign list.**
+- [ ] **Pagination, filters and search for the campaign list,** in the API and the web app.
 - [ ] **A shared error framework** with stable codes, translations and HTTP mapping at the API
       boundary. Error bodies are local to each capability's handlers today.
+- [ ] **A preview of sample recipients** in the composer. It would show personal data, so it
+      needs a decision on who may see it; the estimate shows counts only today (§27).
+- [ ] **Browser end-to-end tests** in CI (e.g. Playwright). Component tests run in jsdom
+      today, and the main flows were checked in Chrome by hand (PHASE_REVIEWS.md, Phase 6).
+- [ ] **Live statuses in the campaign list.** It shows them as they were when it loaded;
+      only a campaign's own page follows them live.
+- [ ] **Dark mode.** The colours are tokens on `:root`, so a dark set could be added in one
+      place.

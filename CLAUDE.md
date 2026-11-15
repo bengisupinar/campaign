@@ -6,7 +6,7 @@ content; people review, edit and approve it; approved campaigns are sent asynchr
 to synthetic users through mock providers, with delivery status tracked in real time.
 
 - Backend: Go 1.27, module `github.com/bengisupinar/campaign` at the repo root; chi, GORM + PostgreSQL 18, goose migrations, River job queue (one worker process, `cmd/worker`).
-- Frontend: Vue 3 + TypeScript + Vite in `frontend/`.
+- Frontend: Vue 3 + TypeScript + Vite in `frontend/`, with Vue Router; no store, component library or i18n library (DECISIONS.md §28).
 - `docker compose up --build` starts everything; no `.env` is required.
 - Rationale for every decision: [DECISIONS.md](DECISIONS.md). Setup and commands: [README.md](README.md). What each phase built: [PHASE_REVIEWS.md](PHASE_REVIEWS.md).
 
@@ -23,6 +23,7 @@ to synthetic users through mock providers, with delivery status tracked in real 
 - Secrets come only from the environment. Never commit `.env`; defaults in `.env.example` and `compose.yaml` are development-only.
 - Logs are structured (`slog`); neither logs nor error messages contain credentials or personal data (DSNs, emails, phone numbers).
 - Tests are table-driven, use `httptest` for handlers and run with `-race`. Behaviour changes ship with tests.
+- Frontend: state stays local to pages and components; every request goes through `src/api.ts`; every user-facing text goes through `t()`, with its key in both `src/locales/en.ts` and `tr.ts`; editors emit new values instead of changing what they were given. Draft rules mirror `internal/campaign` with the same field paths and codes; when one changes, change both.
 
 ## Workflow
 

@@ -4,7 +4,8 @@ Each entry records the context, the decision and its consequences. Entries are a
 the project evolves; a superseded decision is marked as such rather than deleted.
 Phase 1 (project foundation, entries 1–12) and Phase 2A (customer and commerce, 13–17)
 decisions were recorded on 2026-11-13; Phase 2B (seeding, 18), Phase 3 (campaigns, 19–21),
-Phase 4 (segmentation, 22–23) and Phase 5 (delivery, 24–26) on 2026-11-14.
+Phase 4 (segmentation, 22–23) and Phase 5 (delivery, 24–26) on 2026-11-14, and Phase 6
+(frontend, 27–28) on 2026-11-15.
 
 ## 1. One repository: Go module at the root, Vue app in `frontend/`
 
@@ -150,6 +151,9 @@ backend builds become coupled).
 
 **Consequences.** Frontend and backend build independently. Server-sent events through nginx
 will need `proxy_buffering off` on their location.
+
+*Revised by decision 28:* only Vue Router was added; state stays local and the styling is
+plain CSS. Decision 26 settled the event streams with `X-Accel-Buffering: no`.
 
 ## 11. Redis deferred; queue technology still open
 
@@ -424,6 +428,8 @@ DSL and its structural validation.
   - Unknown references are reported with the draft's other problems. A segment with problems
     of its own gets no reference report, so a malformed name is never also called unknown.
 - **No REST API.** The AI agent's tools and delivery will call the service directly.
+  *Amended by decision 27:* the composer gets a read-only estimate and the names a segment can
+  use.
 
 **Consequences.**
 
@@ -677,6 +683,93 @@ providers allow 100 requests per second per channel.
   dispatch.
 - **Not built yet:** unscheduling and cancelling, cross-campaign statistics and receipt
   timeouts (README, further improvements).
+
+## 27. A read-only segment API for the composer
+
+**Context.** While a segment is edited, the composer must show whom it reaches. It must also
+offer the countries, cities and categories a segment can name: names match exactly
+(`İstanbul`), so free text would mostly fail as `unknown`. Decision 22 kept segmentation off
+the REST API.
+
+**Decision.** `internal/segmentation` serves two read-only routes at `/api/segments`
+(`http.go`), amending decision 22:
+
+- **`GET /api/segments/options`:** the countries (code and name), the cities (name and
+  country), the categories and the customer languages, each in a stable order. Three small
+  queries: the reference data is a few dozen rows.
+- **`POST /api/segments/audience`,** with the body `{"segment": …}`, answers
+  `{matched, reachable, by_channel: {email, sms}}` as of the request.
+  - It runs `CountAudience`, the query dispatch uses, so estimate and sending agree. On the
+    seeded data, everyone is estimated at 3,552 reachable customers, and dispatch prepares
+    3,552 recipients.
+  - It always counts both channels, so the composer can show the reach of whichever channels
+    the campaign uses.
+  - A segment with problems gets 422 `invalid_segment`, with the same field paths as a
+    campaign draft, unknown names included.
+- **Counts only.** No endpoint returns customers. A preview of sample recipients would show
+  personal data, so it is deferred (README).
+- **Delivery and the AI agent** still call the service directly.
+
+**Consequences.**
+
+- **Cost.** Each estimate is one count query (measured in decision 23). The composer waits
+  400 ms after the last change and cancels stale requests.
+- **Permissions** are read as they are when the estimate runs, and checked again when sending
+  (decision 22).
+
+## 28. Frontend: Vue Router, local state and plain CSS
+
+**Context.** Phase 6 builds the marketer's interface:
+- the campaign list;
+- a three-step composer;
+- live delivery;
+- English and Turkish.
+
+Decision 10 planned Vue Router, Pinia and a component library with the first screens.
+Simplicity and few dependencies come first.
+
+**Decision.**
+
+- **One dependency added: `vue-router` 5,** in history mode; nginx already falls back to
+  `index.html`. Version 5 installs the dependencies of its optional build plugin (33
+  packages), but none of them reach the bundle.
+- **No Pinia.** Each page and component holds its own state. Only the interface language and
+  the notices are shared, as plain module values.
+- **No component library.** The styling is plain CSS:
+  - tokens on `:root` and a few shared classes in `src/styles.css`;
+  - scoped styles in each component;
+  - status colours with AA contrast, always shown with text.
+- **No i18n library.**
+  - `src/i18n.ts` holds a `locale` ref, `t(key, params)` and `Intl` formatting.
+  - The texts are flat dictionaries. `src/locales/en.ts` is the reference; `tr.ts` must have
+    exactly its keys, or type-checking fails.
+  - English is the default, and the choice is kept in `localStorage`.
+- **Every request goes through `src/api.ts`:** the JSON types, one function per endpoint, and
+  every failure as an `ApiError` (status, code, problems).
+- **Rules are mirrored, but the API is authoritative.**
+  - `src/campaign.ts` repeats the draft rules of `internal/campaign` for instant feedback.
+  - Its problems use the same field paths and codes, so client and API problems render the
+    same way.
+  - Only the API knows whether a name exists.
+- **Editors emit new values.** The composer owns the draft; the segment group, condition and
+  message editors emit a replacement instead of changing what they were given.
+- **The wizard never loads a draft.** `CampaignWizard` takes an `initial` draft, so Phase 7 can
+  open an AI proposal, and its problems, in it unchanged.
+- **Dispatch is save, then dispatch:** two requests. A draft that saved stays saved if the
+  dispatch fails.
+- **Live progress** uses one `EventSource` per details page.
+  - The browser retries a connection that dropped.
+  - The page reopens one the browser gave up on, such as when nginx answers 502 while the API
+    restarts. It waits 1 s, doubling up to 15 s.
+  - `done` closes it.
+
+**Consequences.**
+
+- **The rules exist twice.** If the client's rules drift from the API's, the save still
+  catches it, and the API's problem is shown at the same field.
+- **Total spent** is entered in lira and stored in kuruş.
+- **Drafts still save only when complete** (decision 19), so Save draft points at what's
+  missing.
 
 ## Open questions for later phases
 
